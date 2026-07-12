@@ -1,4 +1,4 @@
-.PHONY: dependencies format lint test typecheck build smoke verify
+.PHONY: dependencies format lint test typecheck build smoke verify release
 APPLICATION_NAME=personal-context-mcp
 
 dependencies:
@@ -22,6 +22,20 @@ IMAGE_TAG=$(if $(value DOCKER_IMAGE_TAG),$(value DOCKER_IMAGE_TAG),"latest")
 build:
 	@DOCKER_BUILDKIT=1 docker build -t $(IMAGE_URL):$(IMAGE_TAG) \
 	--progress=plain .
+
+# Build for the x86_64 droplet and push to ECR (deploy happens via
+# personal-infra/context/deploy/deploy.sh).
+REGION=us-east-1
+AWS_PROFILE?=personal
+ECR_REPO=$(shell aws ecr describe-repositories --profile $(AWS_PROFILE) --region $(REGION) \
+  --repository-names personal-context-mcp --query 'repositories[0].repositoryUri' --output text)
+
+release:
+	@aws ecr get-login-password --profile $(AWS_PROFILE) --region $(REGION) | \
+		docker login --username AWS --password-stdin $$(echo $(ECR_REPO) | cut -d/ -f1)
+	@docker build --platform linux/amd64 -t $(ECR_REPO):latest .
+	@docker push $(ECR_REPO):latest
+	@echo "released $(ECR_REPO):latest"
 
 # Streamable-HTTP protocol smoke test against the fixture corpus (no credentials).
 smoke:
