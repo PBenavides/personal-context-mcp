@@ -1,4 +1,5 @@
 import type { EnrichedCorpusConnection } from './enriched-corpus.js';
+import type { VectorSearchConnection } from './vector-search.js';
 
 /**
  * The generalizable connection layer contract.
@@ -11,7 +12,7 @@ import type { EnrichedCorpusConnection } from './enriched-corpus.js';
  */
 
 /** Discriminator for the kinds of external dependency this service can connect to. */
-export type ConnectionKind = 'enriched-corpus';
+export type ConnectionKind = 'enriched-corpus' | 'vector-search';
 
 /** Result of a lightweight liveness probe against a single connection. */
 export interface ConnectionHealth {
@@ -48,6 +49,7 @@ export interface Connection<TClient> {
  */
 export interface ConnectionRegistry {
   readonly enrichedCorpus: EnrichedCorpusConnection;
+  readonly vectorSearch: VectorSearchConnection;
   /** All registered connections, for generic operations like health checks. */
   all(): ReadonlyArray<Connection<unknown>>;
   /** Probe every connection concurrently. */

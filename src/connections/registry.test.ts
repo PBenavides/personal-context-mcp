@@ -26,6 +26,12 @@ const configuredConfig: AppConfig['connections'] = {
     region: 'us-east-1',
     refreshSeconds: 0,
   },
+  vectorSearch: {
+    bucket: '',
+    index: '',
+    region: 'us-east-1',
+    embedModelId: 'amazon.titan-embed-text-v2:0',
+  },
 };
 
 describe('validateConnections', () => {
@@ -45,18 +51,21 @@ describe('validateConnections', () => {
 });
 
 describe('createConnections', () => {
-  it('returns the enriched-corpus connection with the correct kind', () => {
+  it('returns both connections with the correct kinds', () => {
     const registry = createConnections(configuredConfig);
     expect(registry.enrichedCorpus.kind).toBe('enriched-corpus');
-    expect(registry.all()).toEqual([registry.enrichedCorpus]);
+    expect(registry.vectorSearch.kind).toBe('vector-search');
+    expect(registry.all()).toEqual([registry.enrichedCorpus, registry.vectorSearch]);
   });
 
-  it('healthCheckAll() reports not-loaded before load()', async () => {
+  it('healthCheckAll() reports corpus not-loaded before load(), vector search inert', async () => {
     const registry = createConnections(configuredConfig);
     const results = await registry.healthCheckAll();
-    expect(results).toHaveLength(1);
+    expect(results).toHaveLength(2);
     expect(results[0].ok).toBe(false);
     expect(results[0].detail).toMatch(/not loaded/);
+    expect(results[1].ok).toBe(true);
+    expect(results[1].detail).toMatch(/BM25/);
   });
 
   it('healthCheckAll() reports ok after load()', async () => {

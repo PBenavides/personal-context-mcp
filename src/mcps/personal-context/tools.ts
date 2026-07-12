@@ -1,7 +1,9 @@
 import type {
   EnrichedCorpusIndex,
+  EnrichedDocument,
   SearchFilters,
 } from '../../connections/enriched-corpus.js';
+import type { VectorSearchClient } from '../../connections/vector-search.js';
 import { tokenize } from '../../connections/bm25.js';
 
 const DEFAULT_LIMIT = 10;
@@ -28,6 +30,8 @@ export interface SearchHit {
 export interface SearchResult {
   query: string;
   filters: SearchFilters;
+  /** How the hits were ranked: Titan/S3 Vectors similarity, or the BM25 fallback. */
+  mode: 'semantic' | 'keyword';
   total: number;
   hits: SearchHit[];
 }
@@ -52,15 +56,30 @@ export function makeSnippet(body: string, query: string): string {
   return `${start > 0 ? '…' : ''}${slice}${end < body.length ? '…' : ''}`;
 }
 
+function toHit(doc: EnrichedDocument, score: number, query: string): SearchHit {
+  return {
+    path: doc.path,
+    score,
+    category: doc.category,
+    ...(doc.horizon ? { horizon: doc.horizon } : {}),
+    ...(doc.status ? { status: doc.status } : {}),
+    summary: doc.summary,
+    snippet: makeSnippet(doc.body, query),
+  };
+}
+
 /**
- * BM25 keyword search over the enriched corpus (notes + events). `category`/`status`/`horizon`
- * filter on the pipeline's frontmatter; every document that survives the filters is ranked, so
- * a narrow filter still returns the best matches rather than an accidentally-empty page.
+ * Search over the enriched corpus (notes + events). Semantic when the S3 Vectors index is
+ * configured: the query is Titan-embedded and ranked by cosine similarity, with the
+ * `category`/`status`/`horizon` filters applied server-side in the index. Falls back to BM25
+ * keyword ranking when the index is unconfigured (file-source runs) or a vector query fails at
+ * runtime — search stays available on an AWS blip, it just degrades to keywords.
  */
-export function searchContext(
+export async function searchContext(
   corpus: EnrichedCorpusIndex,
+  vector: VectorSearchClient | undefined,
   args: { query: string; category?: string; status?: string; horizon?: string; limit?: number },
-): SearchResult | ToolError {
+): Promise<SearchResult | ToolError> {
   if (!args.query || !args.query.trim()) {
     return { error: 'query must be a non-empty string' };
   }
@@ -70,20 +89,29 @@ export function searchContext(
     horizon: args.horizon,
   };
   const limit = Math.min(Math.max(1, args.limit ?? DEFAULT_LIMIT), MAX_LIMIT);
+
+  if (vector) {
+    try {
+      const vectorHits = await vector.search(args.query, filters, limit);
+      // Hydrate from the corpus snapshot; a key it doesn't know is a stale vector for a
+      // document that left the manifest — skip it rather than serving a dead path.
+      const hits = vectorHits.flatMap(({ key, score }) => {
+        const doc = corpus.getDocument(key);
+        return doc ? [toHit(doc, score, args.query)] : [];
+      });
+      return { query: args.query, filters, mode: 'semantic', total: hits.length, hits };
+    } catch {
+      // fall through to BM25
+    }
+  }
+
   const raw = corpus.search(args.query, filters, limit);
   return {
     query: args.query,
     filters,
+    mode: 'keyword',
     total: raw.length,
-    hits: raw.map(({ score, doc }) => ({
-      path: doc.path,
-      score,
-      category: doc.category,
-      ...(doc.horizon ? { horizon: doc.horizon } : {}),
-      ...(doc.status ? { status: doc.status } : {}),
-      summary: doc.summary,
-      snippet: makeSnippet(doc.body, args.query),
-    })),
+    hits: raw.map(({ score, doc }) => toHit(doc, score, args.query)),
   };
 }
 

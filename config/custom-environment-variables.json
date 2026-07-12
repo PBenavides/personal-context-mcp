@@ -1,7 +1,11 @@
 {
   "port": "PORT",
-  "auth": { "bearerToken": "MCP_BEARER_TOKEN" },
-  "logger": { "level": "LOG_LEVEL" },
+  "auth": {
+    "bearerToken": "MCP_BEARER_TOKEN"
+  },
+  "logger": {
+    "level": "LOG_LEVEL"
+  },
   "connections": {
     "enrichedCorpus": {
       "source": "CORPUS_SOURCE",
@@ -10,6 +14,12 @@
       "prefix": "CONTEXT_PREFIX",
       "region": "AWS_REGION",
       "refreshSeconds": "REFRESH_SECONDS"
+    },
+    "vectorSearch": {
+      "bucket": "VECTOR_BUCKET",
+      "index": "VECTOR_INDEX",
+      "region": "AWS_REGION",
+      "embedModelId": "EMBED_MODEL_ID"
     }
   },
   "security": {

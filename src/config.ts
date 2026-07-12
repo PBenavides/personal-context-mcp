@@ -17,6 +17,18 @@ export interface ConnectionsConfig {
     /** Manifest `run_id` re-check interval; `0` disables background refresh. */
     refreshSeconds: number;
   };
+  /**
+   * The S3 Vectors index behind semantic `search_context` (see
+   * `src/connections/vector-search.ts`). Empty `bucket`/`index` disables it — search falls
+   * back to BM25 — so file-source fixture runs stay credential-free.
+   */
+  vectorSearch: {
+    bucket: string;
+    index: string;
+    region: string;
+    /** Bedrock embedding model id; must match what the pipeline embedded documents with. */
+    embedModelId: string;
+  };
 }
 
 export interface AppConfig {
@@ -59,6 +71,7 @@ export const appConfig: AppConfig = {
       ...config.get<ConnectionsConfig['enrichedCorpus']>('connections.enrichedCorpus'),
       refreshSeconds: Number(config.get<number | string>('connections.enrichedCorpus.refreshSeconds')),
     },
+    vectorSearch: config.get<ConnectionsConfig['vectorSearch']>('connections.vectorSearch'),
   },
   security: config.get<AppConfig['security']>('security'),
 };

@@ -1,7 +1,11 @@
 {
   "port": 3000,
-  "auth": { "bearerToken": "" },
-  "logger": { "level": "info" },
+  "auth": {
+    "bearerToken": ""
+  },
+  "logger": {
+    "level": "info"
+  },
   "connections": {
     "enrichedCorpus": {
       "source": "file",
@@ -10,6 +14,12 @@
       "prefix": "context-enriched/",
       "region": "us-east-1",
       "refreshSeconds": 300
+    },
+    "vectorSearch": {
+      "bucket": "",
+      "index": "",
+      "region": "us-east-1",
+      "embedModelId": "amazon.titan-embed-text-v2:0"
     }
   },
   "security": {

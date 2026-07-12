@@ -10,7 +10,7 @@ const NAME = 'personal-context';
 const VERSION = getAppVersion();
 
 const INSTRUCTIONS =
-  "Keyword (BM25) search over Pablo's enriched personal context: Obsidian vault notes and " +
+  "Semantic search over Pablo's enriched personal context: Obsidian vault notes and " +
   'activity events, classified into a closed 14-category taxonomy (Goal, Project, Person, ' +
   'Habit, Event, …) with horizon/status/salience metadata. Call list_taxonomy to see what ' +
   'exists, search_context to find documents, then get_document for full content.';
@@ -53,8 +53,9 @@ export function buildServer(): McpServer {
     {
       title: 'Search personal context',
       description:
-        'Keyword (BM25) search over the enriched personal-context corpus (vault notes + activity ' +
-        'events). Optional exact-match filters on the taxonomy metadata: category (see ' +
+        'Semantic (embedding) search over the enriched personal-context corpus (vault notes + ' +
+        'activity events); falls back to BM25 keyword ranking if the vector index is ' +
+        'unavailable. Optional exact-match filters on the taxonomy metadata: category (see ' +
         'list_taxonomy), status (proposed|active|dormant|done), horizon ' +
         '(closing|near|mid|far|standing|deferred|cadence|past). Returns compact hits — follow up ' +
         'with get_document for full content.',
@@ -75,7 +76,8 @@ export function buildServer(): McpServer {
     },
     async args => {
       try {
-        return jsonResult(searchContext(getConnections().enrichedCorpus.get(), args));
+        const { enrichedCorpus, vectorSearch } = getConnections();
+        return jsonResult(await searchContext(enrichedCorpus.get(), vectorSearch.maybe(), args));
       } catch (error) {
         return errorResult('Search failed', error);
       }

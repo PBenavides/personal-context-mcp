@@ -1,5 +1,6 @@
 import { appConfig, type AppConfig } from '../config.js';
 import { createEnrichedCorpusConnection } from './enriched-corpus.js';
+import { createVectorSearchConnection } from './vector-search.js';
 import type {
   Connection,
   ConnectionHealth,
@@ -33,12 +34,14 @@ export function createConnections(
   config: AppConfig['connections'],
 ): ConnectionRegistry {
   const enrichedCorpus = createEnrichedCorpusConnection(config.enrichedCorpus);
+  const vectorSearch = createVectorSearchConnection(config.vectorSearch);
 
-  const all: ReadonlyArray<Connection<unknown>> = [enrichedCorpus];
+  const all: ReadonlyArray<Connection<unknown>> = [enrichedCorpus, vectorSearch];
   validateConnections(all);
 
   return {
     enrichedCorpus,
+    vectorSearch,
     all(): ReadonlyArray<Connection<unknown>> {
       return all;
     },
