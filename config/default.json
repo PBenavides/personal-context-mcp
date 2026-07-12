@@ -1,0 +1,17 @@
+{
+  "port": 3000,
+  "jwt": { "jwksUri": "" },
+  "logger": { "level": "info" },
+  "connections": {
+    "localCorpus": { "rootDir": "context-layer" },
+    "postgres": { "url": "" }
+  },
+  "security": {
+    "dnsRebindingProtection": false,
+    "allowedHosts": [],
+    "allowedOrigins": []
+  },
+  "contextLayer": {
+    "excludeCollections": []
+  }
+}

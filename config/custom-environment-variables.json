@@ -1,0 +1,18 @@
+{
+  "port": "PORT",
+  "jwt": { "jwksUri": "JWKS_URI" },
+  "logger": { "level": "LOG_LEVEL" },
+  "connections": {
+    "localCorpus": { "rootDir": "CONTEXT_LAYER_CORPUS_ROOT" },
+    "postgres": { "url": "DATABASE_URL" }
+  },
+  "security": {
+    "dnsRebindingProtection": {
+      "__name": "MCP_DNS_REBINDING_PROTECTION",
+      "__format": "boolean"
+    }
+  },
+  "contextLayer": {
+    "excludeCollections": "CONTEXT_LAYER_EXCLUDE_COLLECTIONS"
+  }
+}
