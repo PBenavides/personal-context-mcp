@@ -28,9 +28,9 @@ describe('validateDefinitions', () => {
 });
 
 describe('getRegistry', () => {
-  it('registers the context-layer MCP with a unique path', () => {
+  it('registers the personal-context MCP with a unique path', () => {
     const paths = getRegistry().map(def => def.path);
-    expect(paths).toContain('context-layer');
+    expect(paths).toContain('personal-context');
     expect(new Set(paths).size).toBe(paths.length);
   });
 });

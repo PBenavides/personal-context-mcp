@@ -1,4 +1,4 @@
-import { contextLayerDefinition } from '../mcps/context-layer/index.js';
+import { personalContextDefinition } from '../mcps/personal-context/index.js';
 import type { McpDefinition } from './types.js';
 
 /** Throws if any definition has an empty path or two share a path, so collisions fail fast. */
@@ -15,7 +15,7 @@ export function validateDefinitions(defs: readonly McpDefinition[]): void {
   }
 }
 
-const definitions: readonly McpDefinition[] = [contextLayerDefinition];
+const definitions: readonly McpDefinition[] = [personalContextDefinition];
 
 validateDefinitions(definitions);
 

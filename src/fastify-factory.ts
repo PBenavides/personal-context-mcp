@@ -9,14 +9,14 @@ import { defaultErrorHandler } from './error-handler.js';
 
 export interface CreateServerOptions {
   loggerInstance: FastifyBaseLogger;
-  jwt: AuthOptions;
+  auth: AuthOptions;
 }
 
 /**
- * Builds the Taxfix-standard Fastify instance from public packages: correlation-id propagation,
+ * Builds the standard Fastify instance from public packages: correlation-id propagation,
  * `@fastify/helmet` security headers, OpenTelemetry instrumentation (`@fastify/otel`), the shared
- * {@link defaultErrorHandler}, request-timeout/-abort logging, and the (phase-1
- * optionally-unenforced) `authenticate` decorator from {@link registerAuth}.
+ * {@link defaultErrorHandler}, request-timeout/-abort logging, and the static-bearer
+ * `authenticate` decorator from {@link registerAuth}.
  */
 export async function createServer(
   options: CreateServerOptions,
@@ -47,7 +47,7 @@ export async function createServer(
   await instance.register(fastifySensible);
   await instance.register(otel.plugin());
   await instance.register(fastifyHelmet);
-  await instance.register(registerAuth, options.jwt);
+  await instance.register(registerAuth, options.auth);
 
   instance.setErrorHandler(defaultErrorHandler);
   registerProcessListeners(instance.log);

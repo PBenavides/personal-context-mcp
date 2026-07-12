@@ -7,7 +7,7 @@ import {
 } from './registry.js';
 import type { Connection, ConnectionKind } from './types.js';
 
-function stub(name: string, kind: ConnectionKind = 'local-corpus'): Connection<unknown> {
+function stub(name: string, kind: ConnectionKind = 'enriched-corpus'): Connection<unknown> {
   return {
     name,
     kind,
@@ -18,15 +18,21 @@ function stub(name: string, kind: ConnectionKind = 'local-corpus'): Connection<u
 }
 
 const configuredConfig: AppConfig['connections'] = {
-  localCorpus: { rootDir: '' },
-  postgres: { url: '' },
+  enrichedCorpus: {
+    source: 'file',
+    rootDir: 'tests/fixtures/enriched',
+    bucket: '',
+    prefix: '',
+    region: 'us-east-1',
+    refreshSeconds: 0,
+  },
 };
 
 describe('validateConnections', () => {
   it('throws on duplicate names', () => {
-    expect(() =>
-      validateConnections([stub('a'), stub('a', 'postgres')]),
-    ).toThrow(/Duplicate connection name: a/);
+    expect(() => validateConnections([stub('a'), stub('a')])).toThrow(
+      /Duplicate connection name: a/,
+    );
   });
 
   it('throws on an empty name', () => {
@@ -34,41 +40,31 @@ describe('validateConnections', () => {
   });
 
   it('accepts unique, non-empty names', () => {
-    expect(() =>
-      validateConnections([stub('a'), stub('b', 'postgres')]),
-    ).not.toThrow();
+    expect(() => validateConnections([stub('a'), stub('b')])).not.toThrow();
   });
 });
 
 describe('createConnections', () => {
-  it('returns both connections with the correct kinds', () => {
+  it('returns the enriched-corpus connection with the correct kind', () => {
     const registry = createConnections(configuredConfig);
-    expect(registry.localCorpus.kind).toBe('local-corpus');
-    expect(registry.postgres.kind).toBe('postgres');
+    expect(registry.enrichedCorpus.kind).toBe('enriched-corpus');
+    expect(registry.all()).toEqual([registry.enrichedCorpus]);
   });
 
-  it('all() returns exactly the two registered connections', () => {
+  it('healthCheckAll() reports not-loaded before load()', async () => {
     const registry = createConnections(configuredConfig);
-    const all = registry.all();
-    expect(all).toHaveLength(2);
-    expect(all).toEqual(
-      expect.arrayContaining([registry.localCorpus, registry.postgres]),
-    );
-  });
-
-  it('healthCheckAll() returns two health results', async () => {
-    // Use an unconfigured config so no real filesystem/network access happens.
-    const registry = createConnections({
-      localCorpus: { rootDir: '' },
-      postgres: { url: '' },
-    });
     const results = await registry.healthCheckAll();
-    expect(results).toHaveLength(2);
-    expect(results.map(r => r.kind)).toEqual(
-      expect.arrayContaining(['local-corpus', 'postgres']),
-    );
-    // Both unconfigured, so both report ok:false.
-    expect(results.every(r => r.ok === false)).toBe(true);
+    expect(results).toHaveLength(1);
+    expect(results[0].ok).toBe(false);
+    expect(results[0].detail).toMatch(/not loaded/);
+  });
+
+  it('healthCheckAll() reports ok after load()', async () => {
+    const registry = createConnections(configuredConfig);
+    await registry.enrichedCorpus.load();
+    const results = await registry.healthCheckAll();
+    expect(results[0].ok).toBe(true);
+    expect(results[0].detail).toMatch(/documents/);
   });
 });
 
@@ -87,6 +83,6 @@ describe('getConnections / resetConnections', () => {
     const first = getConnections();
     resetConnections();
     const second = getConnections();
-    expect(first).not.toBe(second);
+    expect(second).not.toBe(first);
   });
 });

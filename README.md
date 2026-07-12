@@ -1,76 +1,76 @@
-# txf-context-mcp — documentation
+# personal-context-mcp
 
-`txf-context-mcp` is Taxfix's central **Model Context Protocol (MCP) hosting
-service**, owned by `@taxfix/ai-engineering` (domain `tech-foundation`, see
-[`catalog-info.yaml`](../catalog-info.yaml)). It is one deployable Fastify
-application that hosts many independent, self-contained MCP servers behind a
-shared management surface (health, readiness, discovery).
-
-## Why this exists
-
-Coding agents need access to various pieces of Taxfix-specific knowledge via
-the Model Context Protocol. Rather than standing up a separate deployable per
-knowledge domain, this service hosts them all: each MCP is added as a small,
-isolated module and mounted at its own URL path. Operational concerns (auth,
-logging, health checks, discovery) are handled once, centrally, so each MCP
-only has to implement its own tools and data.
-
-## Architecture at a glance
+MCP server exposing Pablo's enriched personal context — Obsidian vault notes
+and activity events, classified by the
+[context-pipeline](../context-pipeline/) into a closed 14-category taxonomy —
+over **streamable HTTP** with **BM25 search**.
 
 ```
-                     ┌─────────────────────────────────────────┐
-                     │              Fastify host                │
-                     │  (src/fastify-factory.ts createServer)    │
-                     │                                           │
-  GET /health ───────┤  management surface (plain routes)       │
-  GET /ready  ───────┤  - registered in src/routes.ts            │
-  GET /       ───────┤                                           │
-                     │                                           │
-  POST /<mcp-a> ─────┤  MCP routes (raw JSON-RPC, one per        │
-  POST /<mcp-b> ─────┤  registered MCP, mounted by                │
-  POST /<mcp-…> ─────┤  src/registry/mount.ts)                    │
-                     └─────────────────────────────────────────┘
+s3://…/context-enriched/  ──(boot load + run_id refresh)──►  in-memory corpus
+                                                                   │
+client ──POST /personal-context (Bearer token)──►  search_context / get_document / list_taxonomy
 ```
 
-Two things define the shape of this codebase:
+## Tools (MCP `personal-context`, mounted at `/personal-context`)
 
-1. **One host, many MCPs.** [`src/registry/registry.ts`](../src/registry/registry.ts)
-   is the single list of MCPs mounted on the server. Each MCP lives under
-   `src/mcps/<name>/` and knows nothing about the others or about the host —
-   see [MCP registry & mounting](./mcp-registry.md). Currently mounted:
-   [`context-layer`](./context-layer-mcp.md) (local BM25 keyword search).
-2. **Stateless, per-request MCP servers.** There is no session affinity: a
-   fresh `McpServer` + transport is built for *every* incoming request. Only
-   read-only cached data and shared connection clients are reused across
-   requests. See [Server & hosting](./server-and-hosting.md).
-3. **Generalizable connection layer.** External dependencies (a local
-   filesystem corpus and a Postgres scaffold) are reached through a uniform
-   `Connection<T>` registry — see [Connection layer](./connections.md).
+| Tool | Purpose |
+|---|---|
+| `search_context({query, category?, status?, horizon?, limit?})` | BM25 over notes + events, filtered by taxonomy metadata; compact hits with `path`, `score`, `category`, `summary`, `snippet`. |
+| `get_document({path, full?})` | Full document (frontmatter + body) or a bounded preview. |
+| `list_taxonomy()` | Categories with document counts + taxonomy/manifest versions. |
 
-## Current state (important context)
+Details: [docs/personal-context-mcp.md](docs/personal-context-mcp.md). The
+hosting architecture (per-request stateless transport, MCP registry,
+connection layer) is documented in [docs/](docs/).
 
-This repository was generated from Taxfix's standard service template and then
-had a TypeScript implementation added under `src/` (currently on the
-`ts-implementation` branch, not yet merged). The runtime scaffolding now exists:
-`package.json`, `tsconfig.json`, `jest.config.mjs`, ESLint/Prettier,
-`config/*.json`, `resource-files/`, `Dockerfile`/`.dockerignore`, and a
-wired `Makefile`.
+## Run it
 
-All dependencies are public — `npm ci`/`build`/`test` need no `NPM_TOKEN` or
-private-registry credentials. See [Current gaps](./current-gaps.md) for the
-full validation history.
+```bash
+npm ci
+npm run dev            # serves the test fixture corpus on :3000, no credentials needed
+```
 
-## Reading order
+Against the real enriched layer:
 
-- [Server & hosting](./server-and-hosting.md) — the Fastify host, config,
-  context, logging, the management surface.
-- [MCP registry & mounting](./mcp-registry.md) — how MCPs are declared,
-  validated, and mounted as stateless JSON-RPC routes; how to add a new one.
-- [Connection layer](./connections.md) — the generalizable `Connection<T>`
-  registry (local corpus, Postgres scaffold); how to add a kind.
-- [`context-layer` MCP](./context-layer-mcp.md) — the local BM25 keyword-search
-  MCP; Tools/Resource/Prompt, the evolvable `searches/` folder.
-- [Development & operations](./development-and-operations.md) — Makefile,
-  CI/CD, versioning/release-please, ownership, and known gaps.
-- [Current gaps](./current-gaps.md) — validation against the `mcp-server-dev`
-  plugin's guidance; what's fixed and what's still outstanding.
+```bash
+CORPUS_SOURCE=s3 CONTEXT_BUCKET=personal-pbenavides CONTEXT_PREFIX=context-enriched/ \
+AWS_PROFILE=personal MCP_BEARER_TOKEN=… npm run dev
+```
+
+Point a client at it:
+
+```bash
+claude mcp add --transport http personal-context http://localhost:3000/personal-context \
+  --header "Authorization: Bearer $MCP_BEARER_TOKEN"
+```
+
+## Configuration
+
+Via `config/*.json` + env overrides (`config/custom-environment-variables.json`).
+See [.env.example](.env.example) for the full list:
+
+| Env | Default | Meaning |
+|---|---|---|
+| `PORT` | `3000` | HTTP port. |
+| `MCP_BEARER_TOKEN` | *(empty = unauthenticated!)* | Static bearer required on MCP routes; `/health`+`/ready` stay open. |
+| `CORPUS_SOURCE` | `file` | `file` or `s3`. |
+| `CORPUS_ROOT` | `tests/fixtures/enriched` | Root directory for the `file` source. |
+| `CONTEXT_BUCKET` / `CONTEXT_PREFIX` | — / `context-enriched/` | S3 location for the `s3` source (default AWS credential chain). |
+| `REFRESH_SECONDS` | `300` | Manifest `run_id` re-check interval; `0` disables. |
+
+## Verify
+
+```bash
+make verify   # typecheck + lint + jest + template-scrub grep + streamable-HTTP smoke test
+```
+
+`scripts/mcp_smoke.sh` starts the server against fixtures (or targets
+`MCP_URL`) and asserts the `initialize` → `tools/list` → `tools/call
+search_context` flow end to end — Workstream F reuses it with the production
+URL and real token.
+
+## Deploy (Workstream E hook)
+
+`make build` produces the Docker image; the container reads everything from
+env (see above), serves `/health` for probes, and needs only S3 read access to
+the enriched prefix (task role or `AWS_*` keys).

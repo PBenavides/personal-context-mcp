@@ -1,39 +1,23 @@
-# Local testing stack: txf-context-mcp behind the agentgateway MCP gateway.
+# Local container run against the fixture corpus (no AWS credentials needed).
 #
-# Usage:
-#   cp agentgateway/config.example.yaml agentgateway/config.yaml
-#   docker compose build txf-context-mcp
-#   docker compose up
+#   docker compose up --build
+#   MCP_URL=http://127.0.0.1:3000/personal-context MCP_BEARER_TOKEN=local-dev-token \
+#     ./scripts/mcp_smoke.sh
 #
-# Then point the MCP inspector at the gateway (not the server directly):
-#   npx @modelcontextprotocol/inspector
-#   -> Transport: Streamable HTTP, URL: http://localhost:3000/context-layer
-#
-# `txf-context-mcp` is reachable directly on 3001 for bypassing the gateway while debugging.
+# For the real corpus, switch the environment to CORPUS_SOURCE=s3 and provide
+# CONTEXT_BUCKET + AWS credentials (e.g. via env_file: .env).
 services:
-  txf-context-mcp:
-    container_name: txf-context-mcp
+  personal-context-mcp:
+    container_name: personal-context-mcp
     build:
       context: .
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3001:3000"
-    env_file:
-      - .env
+      - "127.0.0.1:3000:3000"
     environment:
       - PORT=3000
-
-  agentgateway:
-    container_name: agentgateway
-    restart: unless-stopped
-    image: cr.agentgateway.dev/agentgateway:v1.2.0
-    depends_on:
-      - txf-context-mcp
-    ports:
-      - "3000:3000"
-      - "127.0.0.1:15000:15000"
+      - MCP_BEARER_TOKEN=local-dev-token
+      - CORPUS_SOURCE=file
+      - CORPUS_ROOT=/corpus
     volumes:
-      - ./agentgateway/config.yaml:/config.yaml:ro
-    environment:
-      - ADMIN_ADDR=0.0.0.0:15000
-    command: ["-f", "/config.yaml"]
+      - ./tests/fixtures/enriched:/corpus:ro

@@ -10,7 +10,7 @@ Every MCP is described by an `McpDefinition`:
 
 ```ts
 interface McpDefinition {
-  readonly path: string;              // URL segment, e.g. "context-layer"
+  readonly path: string;              // URL segment, e.g. "personal-context"
   readonly name: string;              // advertised during MCP `initialize`
   readonly version: string;           // advertised during MCP `initialize`
   readonly build: () => McpServer;    // factory — NOT a singleton

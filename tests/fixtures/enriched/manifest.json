@@ -1,0 +1,43 @@
+{
+  "files": {
+    "events/english-collector/2026-07-11.json": {
+      "body_hash": "f1e2d3c4b5a6978877665544332211ffeeddccbbaa99887766554433221100ff",
+      "category": "Event",
+      "enriched_at": "2026-07-12T10:00:03Z"
+    },
+    "events/english-collector/2026-07-12.json": {
+      "body_hash": "a1b2c3d4e5f6071829384756exampleeventhash0000000000000000000000ab",
+      "category": "Event",
+      "enriched_at": "2026-07-12T10:00:04Z"
+    },
+    "notes/_pipeline_sentinel.md": {
+      "body_hash": "1a3884dbb7d6ecd4419006938aff3ebe8577e4de22169a7856415a6dba30d719",
+      "category": "Goal",
+      "enriched_at": "2026-07-12T10:00:00Z"
+    },
+    "notes/health/knee-rehab.md": {
+      "body_hash": "2b4995ecc8e7fde5520117a49b00f4cf9688f5ef33270b8967526e7eb41e082a",
+      "category": "HealthCondition",
+      "enriched_at": "2026-07-12T10:00:01Z"
+    },
+    "notes/projects/context-pipeline.md": {
+      "body_hash": "3c5aa6fdd9f80ef6631228b5ac11a5da0799a6f044381c9a78637f8fc52f193b",
+      "category": "Project",
+      "enriched_at": "2026-07-12T10:00:02Z"
+    },
+    "notes/projects/old-blog.md": {
+      "body_hash": "4d6bb70eea091f07742339c6bd22b6eb18aab70155492dab89748a90d630204c",
+      "category": "Project",
+      "enriched_at": "2026-07-12T10:00:05Z"
+    },
+    "notes/habits/morning-run.md": {
+      "body_hash": "5e7cc81ffb1a201885344ad7ce33c7fc29bbc812665a3ebc9a859ba1e741315d",
+      "category": "Habit",
+      "enriched_at": "2026-07-12T10:00:06Z"
+    }
+  },
+  "generated_at": "2026-07-12T10:00:10Z",
+  "run_id": "run-fixture-001",
+  "run_mode": "batch",
+  "taxonomy_version": "fixturetax01"
+}

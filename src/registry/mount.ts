@@ -24,6 +24,9 @@ export interface MountOptions {
  * transport. A fresh McpServer + transport is created per request (no session affinity), and the
  * SDK writes directly to the raw Node response — so `reply.hijack()` hands it response control and
  * Fastify does not also reply. GET/DELETE are 405 (stateless mode has no SSE or session teardown).
+ *
+ * Every MCP route runs behind the `authenticate` preHandler (static bearer, see `src/auth.ts`);
+ * only the management surface (`/health`, `/ready`) stays open.
  */
 export function mountMcp(
   server: FastifyInstance,
@@ -31,8 +34,9 @@ export function mountMcp(
   options: MountOptions = {},
 ): void {
   const url = `/${def.path}`;
+  const routeOptions = { preHandler: server.authenticate };
 
-  server.post(url, async (request: FastifyRequest, reply: FastifyReply) => {
+  server.post(url, routeOptions, async (request: FastifyRequest, reply: FastifyReply) => {
     // Hand the response to the SDK transport; Fastify must not also reply.
     reply.hijack();
     let teardown: (() => void) | undefined;
@@ -78,6 +82,6 @@ export function mountMcp(
     _request: FastifyRequest,
     reply: FastifyReply,
   ): FastifyReply => reply.code(405).send(METHOD_NOT_ALLOWED);
-  server.get(url, methodNotAllowed);
-  server.delete(url, methodNotAllowed);
+  server.get(url, routeOptions, methodNotAllowed);
+  server.delete(url, routeOptions, methodNotAllowed);
 }

@@ -19,7 +19,7 @@ instance. `buildServer` deliberately does **not** call `listen` — see below.
 ## Configuration — `src/config.ts`
 
 `appConfig` is populated from the [`config`](https://www.npmjs.com/package/config)
-npm package, following Taxfix's standard convention: values come from
+npm package, a widely-used convention: values come from
 `config/default.json` plus environment overlays and
 `config/custom-environment-variables.json` (none of these files exist in the
 repo yet — see [Development & operations](./development-and-operations.md)).
@@ -50,7 +50,7 @@ importing `appConfig`/a logger singleton directly — this is what makes
 
 `buildServer(context)` does three things, in order:
 
-1. **`createServer()`** from `src/fastify-factory.ts` — the Taxfix-standard
+1. **`createServer()`** from `src/fastify-factory.ts` — the standard
    Fastify factory, built from public `@fastify/*` packages. It provides,
    out of the box: request logging, correlation-id propagation, `helmet`
    security headers, OpenTelemetry instrumentation (`@fastify/otel`), a

@@ -1,0 +1,34 @@
+{
+  "category": "Event",
+  "enriched_at": "2026-07-12T10:00:03Z",
+  "entities": [
+    "English Collector",
+    "English improvement"
+  ],
+  "events": [
+    {
+      "category": "Event",
+      "id": "evt-001",
+      "occurred_at": "2026-07-11T19:30:00Z",
+      "payload": {
+        "title": "Daily journal",
+        "word_count": 220
+      },
+      "summary": "entry_created at 2026-07-11T19:30:00Z",
+      "type": "entry_created"
+    },
+    {
+      "category": "Event",
+      "id": "evt-002",
+      "occurred_at": "2026-07-11T20:10:00Z",
+      "payload": {
+        "score": 85
+      },
+      "summary": "exam_submitted at 2026-07-11T20:10:00Z",
+      "type": "exam_submitted"
+    }
+  ],
+  "source": "english-collector",
+  "summary": "English Collector activity: 1x entry_created, 1x exam_submitted",
+  "taxonomy_version": "fixturetax01"
+}

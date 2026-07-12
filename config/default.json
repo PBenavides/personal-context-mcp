@@ -1,17 +1,20 @@
 {
   "port": 3000,
-  "jwt": { "jwksUri": "" },
+  "auth": { "bearerToken": "" },
   "logger": { "level": "info" },
   "connections": {
-    "localCorpus": { "rootDir": "context-layer" },
-    "postgres": { "url": "" }
+    "enrichedCorpus": {
+      "source": "file",
+      "rootDir": "tests/fixtures/enriched",
+      "bucket": "",
+      "prefix": "context-enriched/",
+      "region": "us-east-1",
+      "refreshSeconds": 300
+    }
   },
   "security": {
     "dnsRebindingProtection": false,
     "allowedHosts": [],
     "allowedOrigins": []
-  },
-  "contextLayer": {
-    "excludeCollections": []
   }
 }

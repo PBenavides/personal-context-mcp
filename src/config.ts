@@ -3,19 +3,30 @@ import config from 'config';
 /** Connection settings for the external dependencies wired through `src/connections/`. */
 export interface ConnectionsConfig {
   /**
-   * Local BM25 corpus (see `src/connections/local-corpus.ts`). `rootDir` resolves relative to
-   * `resource-files/` (via `getResourcePath`) unless it's an absolute path, which is used as-is
-   * (e.g. tests pointing at a temp fixture directory).
+   * The enriched context corpus (see `src/connections/enriched-corpus.ts`). `source` picks the
+   * backend: `file` reads `rootDir` (relative paths resolve against the process cwd — used for
+   * fixtures and credential-free tests), `s3` reads `bucket`/`prefix` in `region` with the AWS
+   * SDK v3 default credential chain (env keys, profile, or task role).
    */
-  localCorpus: { rootDir: string };
-  /** Postgres connection scaffold — inert until a `url` is configured. */
-  postgres: { url: string };
+  enrichedCorpus: {
+    source: 'file' | 's3';
+    rootDir: string;
+    bucket: string;
+    prefix: string;
+    region: string;
+    /** Manifest `run_id` re-check interval; `0` disables background refresh. */
+    refreshSeconds: number;
+  };
 }
 
 export interface AppConfig {
   port: number;
-  /** JWT verification options (see `src/auth.ts`). Empty `jwksUri` = unenforced (phase 1). */
-  jwt: { jwksUri?: string };
+  /**
+   * Static bearer token required on MCP routes (see `src/auth.ts`). Empty = unenforced (local
+   * dev only — production sets `MCP_BEARER_TOKEN`; the network is Tailscale-gated anyway, this
+   * is defense in depth). `/health` and `/ready` are always unauthenticated.
+   */
+  auth: { bearerToken: string };
   logger: {
     level: string;
   };
@@ -28,49 +39,26 @@ export interface AppConfig {
   security: {
     /** DNS-rebinding protection on MCP endpoints. Default false for the POC. */
     dnsRebindingProtection: boolean;
-    /** Allowed Host header values when protection is on, e.g. ['mcp-server.sdlc.taxfix.io']. */
+    /** Allowed Host header values when protection is on. */
     allowedHosts: string[];
     /** Allowed Origin header values when protection is on. */
     allowedOrigins: string[];
   };
-  /** Options for the context-layer MCP (see `src/mcps/context-layer/`). */
-  contextLayer: {
-    /**
-     * Optional denylist for the live local-corpus collection discovery. Each entry is matched
-     * against collection (subdirectory) names (substring, or a full regex when the entry is a
-     * valid pattern) and matching collections are hidden from `list_collections`, resources, and
-     * search. Lets test/system collections be excluded without a code change. Empty = expose
-     * everything.
-     */
-    excludeCollections: string[];
-  };
-}
-
-/**
- * Normalizes the `contextLayer.excludeCollections` value into a string array. Accepts a native JSON
- * array (from `config/*.json`) or a comma-separated string (from the `CONTEXT_LAYER_EXCLUDE_COLLECTIONS`
- * env var), tolerating blanks and surrounding whitespace.
- */
-export function normalizeExcludeCollections(raw: unknown): string[] {
-  const values = Array.isArray(raw) ? raw : String(raw ?? '').split(',');
-  return values
-    .map(value => String(value).trim())
-    .filter(value => value.length > 0);
 }
 
 /**
  * Application configuration, sourced via the standard `config` package (`config/*.json` +
- * `config/custom-environment-variables.json`), matching the convention used across Taxfix services.
+ * `config/custom-environment-variables.json` for env overrides).
  */
 export const appConfig: AppConfig = {
   port: Number(config.get<number | string>('port')),
-  jwt: config.get<AppConfig['jwt']>('jwt'),
+  auth: config.get<AppConfig['auth']>('auth'),
   logger: config.get<AppConfig['logger']>('logger'),
-  connections: config.get<ConnectionsConfig>('connections'),
-  security: config.get<AppConfig['security']>('security'),
-  contextLayer: {
-    excludeCollections: normalizeExcludeCollections(
-      config.get<unknown>('contextLayer.excludeCollections'),
-    ),
+  connections: {
+    enrichedCorpus: {
+      ...config.get<ConnectionsConfig['enrichedCorpus']>('connections.enrichedCorpus'),
+      refreshSeconds: Number(config.get<number | string>('connections.enrichedCorpus.refreshSeconds')),
+    },
   },
+  security: config.get<AppConfig['security']>('security'),
 };

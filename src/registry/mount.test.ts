@@ -26,6 +26,7 @@ const INITIALIZE_BODY = {
 describe('mountMcp', () => {
   it('responds 405 with a JSON-RPC error to GET and DELETE (stateless: POST only)', async () => {
     const app = Fastify();
+    app.decorate('authenticate', async () => undefined);
     mountMcp(app, { path: 'x', name: 'x', version: '0.0.0', build: makeMcp });
     await app.ready();
 
@@ -52,6 +53,7 @@ describe('mountMcp', () => {
       build,
     };
     const app = Fastify();
+    app.decorate('authenticate', async () => undefined);
     mountMcp(app, def);
     await app.listen({ port: 0, host: '127.0.0.1' });
     const { port } = app.server.address() as AddressInfo;
@@ -90,6 +92,7 @@ describe('mountMcp', () => {
       },
     };
     const app = Fastify();
+    app.decorate('authenticate', async () => undefined);
     mountMcp(app, def);
     await app.listen({ port: 0, host: '127.0.0.1' });
     const { port } = app.server.address() as AddressInfo;

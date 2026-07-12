@@ -1,18 +1,21 @@
 {
   "port": "PORT",
-  "jwt": { "jwksUri": "JWKS_URI" },
+  "auth": { "bearerToken": "MCP_BEARER_TOKEN" },
   "logger": { "level": "LOG_LEVEL" },
   "connections": {
-    "localCorpus": { "rootDir": "CONTEXT_LAYER_CORPUS_ROOT" },
-    "postgres": { "url": "DATABASE_URL" }
+    "enrichedCorpus": {
+      "source": "CORPUS_SOURCE",
+      "rootDir": "CORPUS_ROOT",
+      "bucket": "CONTEXT_BUCKET",
+      "prefix": "CONTEXT_PREFIX",
+      "region": "AWS_REGION",
+      "refreshSeconds": "REFRESH_SECONDS"
+    }
   },
   "security": {
     "dnsRebindingProtection": {
       "__name": "MCP_DNS_REBINDING_PROTECTION",
       "__format": "boolean"
     }
-  },
-  "contextLayer": {
-    "excludeCollections": "CONTEXT_LAYER_EXCLUDE_COLLECTIONS"
   }
 }

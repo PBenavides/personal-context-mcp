@@ -1,11 +1,10 @@
 # Connection layer
 
-The connection layer is the generalizable way MCPs reach external dependencies
-(a local corpus, relational DBs). It lives under
-[`src/connections/`](../src/connections/) and is deliberately small and uniform
-so new dependency kinds can be added without touching anything that consumes
-them — the same "one contract, one registry, fail-fast" shape as the
-[MCP registry](./mcp-registry.md).
+The connection layer is the generalizable way MCPs reach external dependencies.
+It lives under [`src/connections/`](../src/connections/) and is deliberately
+small and uniform so new dependency kinds can be added without touching
+anything that consumes them — the same "one contract, one registry, fail-fast"
+shape as the [MCP registry](./mcp-registry.md).
 
 ## The contract — `src/connections/types.ts`
 
@@ -13,16 +12,16 @@ Every dependency is a `Connection<TClient>`:
 
 ```ts
 interface Connection<TClient> {
-  readonly name: string;        // unique registry key, e.g. "local-corpus"
-  readonly kind: ConnectionKind; // 'local-corpus' | 'postgres'
-  get(): TClient;                // build once (memoised); throws if unconfigured
+  readonly name: string;        // unique registry key, e.g. "enriched-corpus"
+  readonly kind: ConnectionKind;
+  get(): TClient;                // returns the memoised client; throws if not ready
   healthCheck(): Promise<ConnectionHealth>; // never throws — reports ok:false
-  close(): Promise<void>;        // release pools/sockets; no-op for HTTP/in-memory clients
+  close(): Promise<void>;        // release timers/pools/sockets
 }
 ```
 
-`ConnectionRegistry` is the set handed to consumers: typed `localCorpus` /
-`postgres` fields plus generic `all()` and `healthCheckAll()`.
+`ConnectionRegistry` is the set handed to consumers: a typed `enrichedCorpus`
+field plus generic `all()` and `healthCheckAll()`.
 
 ## The registry — `src/connections/registry.ts`
 
@@ -44,55 +43,52 @@ shared across requests. `resetConnections()` exists for tests only.
 
 | Connection | `kind` | Client | Notes |
 |---|---|---|---|
-| `localCorpus` | `local-corpus` | `LocalCorpusIndex` | `get()` throws if `rootDir` is missing/nonexistent; `healthCheck` reports collection/document counts. |
-| `postgres` | `postgres` | — | **Scaffold.** `get()` always throws; the file is the annotated template for adding a new kind. |
+| `enrichedCorpus` | `enriched-corpus` | `EnrichedCorpusIndex` | Loaded at boot (`load()`), refreshed in the background; `get()` throws before the first load. |
 
-### The local corpus — BM25 keyword search over files
+### The enriched corpus — the pipeline's output layer, in memory
 
-[`local-corpus.ts`](../src/connections/local-corpus.ts) reads a directory of
-markdown/text files: one subdirectory per collection, recursed for `.md`/`.txt`
-files. The corpus is static and baked into the Docker image, so the index
-(built by [`bm25.ts`](../src/connections/bm25.ts), a small dependency-free BM25
-implementation — tokenizer, inverted index, `k1=1.2`/`b=0.75` scoring) is
-built **once**, on first `get()`, with no file-watching or hot-reload.
+[`enriched-corpus.ts`](../src/connections/enriched-corpus.ts) consumes the
+contract the context-pipeline writes (`fable_plans/02_…` §"Output contract"):
 
-- **`rootDir` resolution** — relative paths resolve against `resource-files/`
-  (via `getResourcePath()`); absolute paths (e.g. a test's temp fixture
-  directory) are used as-is. The production default (`config/default.json`)
-  is `"context-layer"`, resolving to `resource-files/context-layer/`.
-- **Document shape** — every document is uniform: `{ id, collection, title,
-  path, content }`. `title` comes from the first markdown `# heading`, else
-  the filename. There is no per-document-type payload schema to account for
-  (unlike Qdrant's per-collection payloads previously).
-- **`healthCheck`** — reports `ok: true` with collection/document counts once
-  the corpus root exists and is a directory (even if it currently has zero
-  collections — an empty corpus is valid, not a misconfiguration); `ok: false,
-  detail: 'not configured'` if `rootDir` is empty/nonexistent/not a directory.
-- **No embeddings, no external AI provider (v1).** Retrieval is BM25 keyword
-  scoring only — no stemming, no fuzzy matching, no semantic search. This may
-  be added later as a second connection kind if needed; nothing here builds
-  toward that speculatively.
+```
+<root>/manifest.json                             # taxonomy_version, run_id, files map
+<root>/notes/<vault-relative-path>.md            # enriched frontmatter + original body
+<root>/events/english-collector/<iso-date>.json  # one day of activity events
+```
 
-### Testability
+Two sources implement one tiny reader contract (`readText(key)`):
 
-Every factory takes an optional `deps` bag with sane defaults (`readCorpus`
-for the local corpus) so tests inject fakes without ESM module mocking. See
-`*.test.ts` next to each module. `local-corpus.test.ts` also exercises the
-real filesystem via `fs.mkdtempSync` fixtures for the discovery/indexing paths
-that are cheap and deterministic to run for real.
+- **`file`** — a local directory; relative `rootDir` resolves against the
+  process cwd. Used for `tests/fixtures/enriched/` so jest and the smoke
+  script run with **zero AWS credentials**.
+- **`s3`** — AWS SDK v3 (`@aws-sdk/client-s3`, lazily imported) against
+  `CONTEXT_BUCKET`/`CONTEXT_PREFIX` in `AWS_REGION`, using the default
+  credential chain (env keys, profile, or task role).
+
+Lifecycle:
+
+1. **Boot** — `index.ts` awaits `load()` before `listen()`: the manifest and
+   every listed document are read into memory and indexed with
+   [`bm25.ts`](../src/connections/bm25.ts) (a small dependency-free BM25:
+   tokenizer, inverted index, `k1=1.2`/`b=0.75`). A failed load crashes the
+   process (fail fast; the container restarts).
+2. **Refresh** — `startRefresh()` re-reads only `manifest.json` every
+   `REFRESH_SECONDS` (default 300; `0` disables) and reloads the corpus only
+   when `run_id` changed, swapping the snapshot atomically. A failed refresh
+   logs a warning and keeps serving the previous snapshot.
+3. **Search** — `search(query, filters, limit)` scores the whole (small)
+   corpus, then applies case-insensitive `category`/`status`/`horizon`
+   equality filters, so a narrow filter still returns the best matches.
+
+Document normalization: notes are split into YAML frontmatter + body
+(`src/utils/frontmatter.ts`; malformed frontmatter degrades to an empty
+metadata object instead of throwing). Event JSON files become one document per
+day with `horizon: past`, `status: done` defaults and a text rendering of the
+day's events as the searchable body.
 
 ## Adding a new connection kind
 
-`postgres.ts` documents the full recipe. In short: copy it, add the
-`ConnectionKind` literal in `types.ts`, add a config block in `config.ts` +
-`config/*.json`, implement `get()`/`healthCheck()`/`close()`, register it in
-`createConnections()`, and (if callers need typed access) add a field to
-`ConnectionRegistry`. Add DI-based unit tests.
-
-## Configuration
-
-Read from `appConfig.connections` (see [Server & hosting](./server-and-hosting.md)),
-which the `config` package populates from `config/default.json` +
-`config/custom-environment-variables.json` (env vars
-`CONTEXT_LAYER_CORPUS_ROOT`, `DATABASE_URL`). Secrets come from the
-environment (`.env` locally, which is gitignored; k8s secrets in production).
+Implement the `Connection<T>` interface in a new `src/connections/<kind>.ts`,
+add the `ConnectionKind` literal and a config block, register it in
+`createConnections()`, and unit-test it with injected fakes (see
+`enriched-corpus.test.ts` — no ESM module mocking).

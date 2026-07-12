@@ -1,6 +1,5 @@
 import { appConfig, type AppConfig } from '../config.js';
-import { createLocalCorpusConnection } from './local-corpus.js';
-import { createPostgresConnection } from './postgres.js';
+import { createEnrichedCorpusConnection } from './enriched-corpus.js';
 import type {
   Connection,
   ConnectionHealth,
@@ -33,15 +32,13 @@ export function validateConnections(
 export function createConnections(
   config: AppConfig['connections'],
 ): ConnectionRegistry {
-  const localCorpus = createLocalCorpusConnection(config.localCorpus);
-  const postgres = createPostgresConnection(config.postgres);
+  const enrichedCorpus = createEnrichedCorpusConnection(config.enrichedCorpus);
 
-  const all: ReadonlyArray<Connection<unknown>> = [localCorpus, postgres];
+  const all: ReadonlyArray<Connection<unknown>> = [enrichedCorpus];
   validateConnections(all);
 
   return {
-    localCorpus,
-    postgres,
+    enrichedCorpus,
     all(): ReadonlyArray<Connection<unknown>> {
       return all;
     },
@@ -67,7 +64,7 @@ export function getConnections(): ConnectionRegistry {
 
 /**
  * Clears the cached registry. Test-only — production code should never call this, because
- * discarding the cache also discards the memoised clients (and any pools they may hold).
+ * discarding the cache also discards the memoised clients (and any state they hold).
  */
 export function resetConnections(): void {
   cached = undefined;

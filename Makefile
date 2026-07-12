@@ -1,9 +1,5 @@
-.PHONY: bootstrap dependencies format lint test build check
-TAXFIX_MAKEFILE_VERSION=1
-APPLICATION_NAME=txf-context-mcp
-
-bootstrap:
-	@echo "This command is currently a Noop."
+.PHONY: dependencies format lint test typecheck build smoke verify
+APPLICATION_NAME=personal-context-mcp
 
 dependencies:
 	@npm ci
@@ -13,6 +9,9 @@ format:
 
 lint:
 	@npm run lint
+
+typecheck:
+	@npm run typecheck
 
 test:
 	@npm test
@@ -24,4 +23,16 @@ build:
 	@DOCKER_BUILDKIT=1 docker build -t $(IMAGE_URL):$(IMAGE_TAG) \
 	--progress=plain .
 
-check: dependencies lint test build
+# Streamable-HTTP protocol smoke test against the fixture corpus (no credentials).
+smoke:
+	@bash scripts/mcp_smoke.sh
+
+# The Workstream C verification gates: no taxfix leftovers, types, lint, unit
+# tests, and the real-protocol smoke test.
+verify: typecheck lint test smoke
+	@if grep -riq taxfix . --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=.git --exclude=Makefile; then \
+		echo "VERIFY FAIL: 'taxfix' still referenced:"; \
+		grep -ril taxfix . --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=.git --exclude=Makefile; \
+		exit 1; \
+	fi
+	@echo "verify: ALL GREEN"

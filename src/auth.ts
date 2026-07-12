@@ -1,10 +1,10 @@
-import fastifyJwt from '@fastify/jwt';
-import buildGetJwks from 'get-jwks';
+import { timingSafeEqual } from 'node:crypto';
 import fp from 'fastify-plugin';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 
 export interface AuthOptions {
-  jwksUri?: string;
+  /** The static bearer token MCP routes require. Empty = unenforced (local dev). */
+  bearerToken: string;
 }
 
 declare module 'fastify' {
@@ -13,38 +13,37 @@ declare module 'fastify' {
   }
 }
 
+/** Constant-time comparison; length mismatch short-circuits but leaks nothing useful. */
+function tokenMatches(presented: string, expected: string): boolean {
+  const a = Buffer.from(presented);
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 /**
- * Decorates `authenticate`, a preHandler MCP/management routes can opt into.
+ * Decorates `authenticate`, the preHandler the MCP routes opt into (`src/registry/mount.ts`).
  *
- * Phase 1: `jwksUri` is unset by default, so verification is unenforced — `authenticate` is a
- * no-op and every route stays reachable. Once a `jwksUri` is configured, `@fastify/jwt` verifies
- * bearer tokens against that JWKS endpoint (via `get-jwks`) and `authenticate` rejects requests
- * with a missing/invalid token.
+ * Auth is a single static bearer token (`MCP_BEARER_TOKEN`, from SSM in production): the server
+ * is only reachable over the tailnet, so this is defense in depth rather than user identity —
+ * no JWT, no JWKS, no multi-user. When the token is unset, `authenticate` is a no-op so local
+ * dev and fixtures work with zero setup; production must set it.
  */
 export const registerAuth = fp<AuthOptions>(
-  async (fastify, { jwksUri }) => {
-    if (!jwksUri) {
+  async (fastify, { bearerToken }) => {
+    if (!bearerToken) {
+      fastify.log.warn('MCP_BEARER_TOKEN is not set — MCP routes are UNAUTHENTICATED');
       fastify.decorate('authenticate', async () => {
-        // Unenforced: no jwksUri configured.
+        // Unenforced: no token configured.
       });
       return;
     }
 
-    const domain = new URL(jwksUri).origin;
-    const getJwks = buildGetJwks({ providerDiscovery: true, jwksPath: new URL(jwksUri).pathname });
-    await fastify.register(fastifyJwt, {
-      secret: (_request: FastifyRequest, tokenOrHeader: fastifyJwt.TokenOrHeader) => {
-        const header = 'header' in tokenOrHeader ? tokenOrHeader.header : tokenOrHeader;
-        return getJwks.getPublicKey({ kid: header.kid, alg: header.alg, domain });
-      },
-    });
-
     fastify.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply) => {
-      try {
-        await request.jwtVerify();
-      } catch (error) {
-        request.log.warn({ err: error }, 'failed authentication');
-        await reply.unauthorized();
+      const header = request.headers.authorization ?? '';
+      const presented = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : '';
+      if (!presented || !tokenMatches(presented, bearerToken)) {
+        request.log.warn('failed authentication');
+        await reply.unauthorized('Missing or invalid bearer token');
       }
     });
   },
