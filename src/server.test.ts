@@ -98,7 +98,14 @@ describe('buildServer (auth enforced)', () => {
     expect(list.status).toBe(200);
     const listBody = (await list.json()) as { result: { tools: { name: string }[] } };
     const names = listBody.result.tools.map(tool => tool.name).sort();
-    expect(names).toEqual(['get_document', 'list_taxonomy', 'search_context']);
+    expect(names).toEqual([
+      'get_document',
+      'list_taxonomy',
+      'ontology_search',
+      'ontology_sync',
+      'ontology_update',
+      'search_context',
+    ]);
   });
 
   it('answers a search_context call end to end', async () => {

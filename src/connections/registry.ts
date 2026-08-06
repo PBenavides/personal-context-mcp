@@ -1,6 +1,11 @@
 import { appConfig, type AppConfig } from '../config.js';
 import { createEnrichedCorpusConnection } from './enriched-corpus.js';
+import { createGoogleCalendarConnection } from './google-calendar.js';
+import { createHevyConnection } from './hevy.js';
+import { createOntologyStoreConnection } from './ontology-store.js';
+import { createOpenRouterConnection } from './openrouter.js';
 import { createVectorSearchConnection } from './vector-search.js';
+import { createYnabConnection } from './ynab.js';
 import type {
   Connection,
   ConnectionHealth,
@@ -35,13 +40,31 @@ export function createConnections(
 ): ConnectionRegistry {
   const enrichedCorpus = createEnrichedCorpusConnection(config.enrichedCorpus);
   const vectorSearch = createVectorSearchConnection(config.vectorSearch);
+  const ontologyStore = createOntologyStoreConnection(config.ontology);
+  const openRouter = createOpenRouterConnection(config.openRouter);
+  const ynab = createYnabConnection(config.ynab);
+  const hevy = createHevyConnection(config.hevy);
+  const googleCalendar = createGoogleCalendarConnection(config.googleCalendar);
 
-  const all: ReadonlyArray<Connection<unknown>> = [enrichedCorpus, vectorSearch];
+  const all: ReadonlyArray<Connection<unknown>> = [
+    enrichedCorpus,
+    vectorSearch,
+    ontologyStore,
+    openRouter,
+    ynab,
+    hevy,
+    googleCalendar,
+  ];
   validateConnections(all);
 
   return {
     enrichedCorpus,
     vectorSearch,
+    ontologyStore,
+    openRouter,
+    ynab,
+    hevy,
+    googleCalendar,
     all(): ReadonlyArray<Connection<unknown>> {
       return all;
     },

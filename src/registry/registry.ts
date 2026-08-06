@@ -1,4 +1,5 @@
 import { personalContextDefinition } from '../mcps/personal-context/index.js';
+import { personalToolsDefinition } from '../mcps/personal-tools/index.js';
 import type { McpDefinition } from './types.js';
 
 /** Throws if any definition has an empty path or two share a path, so collisions fail fast. */
@@ -15,7 +16,10 @@ export function validateDefinitions(defs: readonly McpDefinition[]): void {
   }
 }
 
-const definitions: readonly McpDefinition[] = [personalContextDefinition];
+const definitions: readonly McpDefinition[] = [
+  personalContextDefinition,
+  personalToolsDefinition,
+];
 
 validateDefinitions(definitions);
 

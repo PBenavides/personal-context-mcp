@@ -20,6 +20,35 @@
       "index": "VECTOR_INDEX",
       "region": "AWS_REGION",
       "embedModelId": "EMBED_MODEL_ID"
+    },
+    "ontology": {
+      "source": "ONTOLOGY_SOURCE",
+      "rootDir": "ONTOLOGY_ROOT",
+      "bucket": "ONTOLOGY_BUCKET",
+      "prefix": "ONTOLOGY_PREFIX",
+      "region": "AWS_REGION",
+      "syncEnabled": "ONTOLOGY_SYNC_ENABLED",
+      "maxDocsPerRun": "ONTOLOGY_MAX_DOCS"
+    },
+    "openRouter": {
+      "apiKey": "OPENROUTER_API_KEY",
+      "baseUrl": "OPENROUTER_BASE_URL",
+      "chatModel": "OPENROUTER_CHAT_MODEL",
+      "embedModel": "OPENROUTER_EMBED_MODEL"
+    },
+    "ynab": {
+      "token": "YNAB_TOKEN",
+      "baseUrl": "YNAB_BASE_URL"
+    },
+    "hevy": {
+      "apiKey": "HEVY_API_KEY",
+      "baseUrl": "HEVY_BASE_URL"
+    },
+    "googleCalendar": {
+      "refreshToken": "GOOGLE_CALENDAR_REFRESH_TOKEN",
+      "clientId": "GOOGLE_CLIENT_ID",
+      "clientSecret": "GOOGLE_CLIENT_SECRET",
+      "baseUrl": "GOOGLE_CALENDAR_BASE_URL"
     }
   },
   "security": {

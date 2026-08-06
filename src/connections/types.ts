@@ -1,5 +1,10 @@
 import type { EnrichedCorpusConnection } from './enriched-corpus.js';
+import type { GoogleCalendarConnection } from './google-calendar.js';
+import type { HevyConnection } from './hevy.js';
+import type { OntologyStoreConnection } from './ontology-store.js';
+import type { OpenRouterConnection } from './openrouter.js';
 import type { VectorSearchConnection } from './vector-search.js';
+import type { YnabConnection } from './ynab.js';
 
 /**
  * The generalizable connection layer contract.
@@ -12,7 +17,14 @@ import type { VectorSearchConnection } from './vector-search.js';
  */
 
 /** Discriminator for the kinds of external dependency this service can connect to. */
-export type ConnectionKind = 'enriched-corpus' | 'vector-search';
+export type ConnectionKind =
+  | 'enriched-corpus'
+  | 'vector-search'
+  | 'ontology-store'
+  | 'openrouter'
+  | 'ynab'
+  | 'hevy'
+  | 'google-calendar';
 
 /** Result of a lightweight liveness probe against a single connection. */
 export interface ConnectionHealth {
@@ -50,6 +62,11 @@ export interface Connection<TClient> {
 export interface ConnectionRegistry {
   readonly enrichedCorpus: EnrichedCorpusConnection;
   readonly vectorSearch: VectorSearchConnection;
+  readonly ontologyStore: OntologyStoreConnection;
+  readonly openRouter: OpenRouterConnection;
+  readonly ynab: YnabConnection;
+  readonly hevy: HevyConnection;
+  readonly googleCalendar: GoogleCalendarConnection;
   /** All registered connections, for generic operations like health checks. */
   all(): ReadonlyArray<Connection<unknown>>;
   /** Probe every connection concurrently. */
