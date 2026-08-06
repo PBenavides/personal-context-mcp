@@ -3,12 +3,9 @@ import { z } from 'zod';
 import { getConnections } from '../../connections/registry.js';
 import type { McpDefinition } from '../../registry/types.js';
 import { getAppVersion } from '../../version.js';
+import { MUSCLE_GROUPS } from './hevy-payloads.js';
 import {
-  CUSTOM_EXERCISE_TYPES,
-  EQUIPMENT_CATEGORIES,
-  MUSCLE_GROUPS,
-} from './hevy-payloads.js';
-import {
+  ACTIVITY_TYPES,
   gcalCreateEvent,
   gcalDeleteEvent,
   gcalFreeBusy,
@@ -16,14 +13,12 @@ import {
   gcalListCalendars,
   gcalListEvents,
   gcalUpdateEvent,
-  hevyActivityByMuscle,
-  hevyCreateCustomExercise,
+  hevyBodyMeasurements,
   hevyGetWorkout,
   hevyRecentActivity,
   hevyRoutines,
-  hevySearchExercises,
+  hevySearchExerciseCatalog,
   hevyWriteRoutine,
-  hevyWriteWorkout,
   ynabAccounts,
   ynabBudgets,
   ynabCategories,
@@ -42,16 +37,17 @@ const INSTRUCTIONS =
   "Action layer over Pablo's personal accounts, ported from the my-mcp-platform Python " +
   'server. Three integrations: YNAB budgeting (ynab_* — budgets, accounts, transactions, ' +
   'categories, payees, scheduled transactions, aggregated reports), Hevy workout tracking ' +
-  '(hevy_* — recent activity, muscle-group breakdown, exercise search, and creating/updating ' +
-  'workouts and routines), and Google Calendar (gcal_* — list ' +
+  '(hevy_* — recent training by muscle group and day, logged workouts, routines, body ' +
+  'measurements, and exercise-catalog search), and Google Calendar (gcal_* — list ' +
   'calendars/events, get/create/update/delete an event, free/busy lookup). Raw YNAB amounts ' +
   'are in milliunits (1000 = one currency unit); ynab_report already converts to currency ' +
   'units. Most ynab_* tools default to the last-used budget — call ynab_budgets only when ' +
-  'another budget is needed. gcal_* tools default to the "primary" calendar. Hevy writes: ' +
-  'exercises are addressed by exercise_template_id, so call hevy_search_exercises first (or ' +
-  'pass a name and let it resolve); hevy_write_workout logs a session that happened while ' +
-  'hevy_write_routine edits a reusable plan; both create when no id is passed and update when ' +
-  'one is, preserve any field you omit, and accept dry_run to preview the request body.';
+  'another budget is needed. gcal_* tools default to the "primary" calendar. Hevy is read-only ' +
+  'except for hevy_write_routine, which creates a reusable plan when no routine_id is passed ' +
+  'and updates one when it is, preserving any field you omit; exercises there are addressed by ' +
+  'exercise_template_id, so call hevy_search_exercise_catalog first (or pass a name and let it ' +
+  'resolve), and dry_run previews the request body. Hevy cannot log or edit a workout, create a ' +
+  'custom exercise, or delete anything — those happen in the app.';
 
 interface TextResult {
   [key: string]: unknown;
@@ -332,13 +328,46 @@ export function buildServer(): McpServer {
   server.registerTool(
     'hevy_recent_activity',
     {
-      title: 'Recent Hevy workouts',
+      title: 'Recent Hevy training, by muscle group and day',
       description:
-        'Summary of recent gym activity: total workouts, working sets, volume (kg), and ' +
-        'per-session breakdowns (exercises, duration, volume) over the last N days. Warmup ' +
-        'sets are excluded from counts and volume.',
+        'What Pablo has trained recently, grouped by muscle group and then by calendar day — so ' +
+        '"did I already hit triceps this week, and how hard?" is one call. Per group per day: ' +
+        'sets, volume (kg), primary/secondary involvement, and the exercises used. Also returns ' +
+        'every session in the window with its workout_id (the id hevy_get_workout needs), ' +
+        'duration in minutes, sets and volume. Warmup sets are ' +
+        'excluded throughout. Narrow the breakdown with type (all / muscles / cardio) or with ' +
+        'specific for a single group. depth: 1 replaces each day\'s exercise-id map with a ' +
+        'written summary of the sets ("4 sets of 10 repetitions each with min of 15kg, max of ' +
+        '20kg") — it needs a narrowed type and at most 4 days.',
       inputSchema: {
-        days: z.number().int().min(1).max(365).optional().describe('Lookback window (default 14)'),
+        days: z
+          .number()
+          .int()
+          .min(1)
+          .max(365)
+          .optional()
+          .describe('Lookback window in days (default 4; at most 4 when depth is 1)'),
+        type: z
+          .enum(ACTIVITY_TYPES)
+          .optional()
+          .describe(
+            'Which meta-category to break down: all (default), muscles (everything except ' +
+              'cardio), or cardio',
+          ),
+        depth: z
+          .number()
+          .int()
+          .min(0)
+          .max(1)
+          .optional()
+          .describe(
+            '0 (default) lists each exercise as name → exercise_template_id; 1 describes its ' +
+              'sets in words. 1 requires type "muscles"/"cardio" or a specific group, and days <= 4',
+          ),
+        specific: z
+          .enum(MUSCLE_GROUPS)
+          .optional()
+          .describe('Restrict the breakdown to one muscle group (or "cardio")'),
       },
       annotations: { readOnlyHint: true },
     },
@@ -351,35 +380,12 @@ export function buildServer(): McpServer {
     },
   );
 
-  server.registerTool(
-    'hevy_activity_by_muscle',
-    {
-      title: 'Hevy activity by muscle group',
-      description:
-        'Recent gym activity broken down by muscle group (via Hevy exercise-template ' +
-        'metadata): sets and volume per group, split into primary/secondary involvement, ' +
-        'sorted by volume. Groups: abdominals, shoulders, biceps, triceps, forearms, ' +
-        'quadriceps, hamstrings, calves, glutes, abductors, adductors, lats, upper_back, ' +
-        'traps, lower_back, chest, cardio, neck, full_body, other.',
-      inputSchema: {
-        days: z.number().int().min(1).max(365).optional().describe('Lookback window (default 14)'),
-      },
-      annotations: { readOnlyHint: true },
-    },
-    async args => {
-      try {
-        return jsonResult(await hevyActivityByMuscle(getConnections().hevy.get(), args));
-      } catch (error) {
-        return errorResult('Hevy activity by muscle failed', error);
-      }
-    },
-  );
-
   // Shared across the Hevy write tools so the exercise contract cannot drift between them.
   const exercisesSchema = z
     .array(z.record(z.string(), z.unknown()))
     .describe(
-      'Exercises, in order. Identify each by exercise_template_id (from hevy_search_exercises) ' +
+      'Exercises, in order. Identify each by exercise_template_id (from ' +
+        'hevy_search_exercise_catalog) ' +
         'or by exercise: "<name>", which is resolved automatically and errors with the ' +
         'candidates listed if the name is ambiguous. Sets are either an explicit list — ' +
         'sets: [{reps: 8, weight_kg: 60}, ...] — or a count that repeats the set fields on the ' +
@@ -402,24 +408,41 @@ export function buildServer(): McpServer {
     .describe('Return the request body that would be sent, without sending it');
 
   server.registerTool(
-    'hevy_search_exercises',
+    'hevy_search_exercise_catalog',
     {
-      title: 'Search Hevy exercise templates',
+      title: 'Search the Hevy exercise catalog',
       description:
-        'Find exercise templates by name and get their exercise_template_id — the starting ' +
-        'point for writing a workout or routine, since exercises are addressed by id. Ranked ' +
-        'exact match first, then prefix, then substring.',
+        'Look up exercises in the Hevy catalog (its stock templates plus Pablo\'s custom ones) ' +
+        'and get the exercise_template_id every write needs. Search by name — query: "bench ' +
+        'press", "romanian deadlift" — ranked exact, then prefix, then substring; or browse a ' +
+        'muscle_group ("lats", "triceps", "cardio", …) to see what trains it, primary-role ' +
+        'first; or both, to search names within a group. Each match returns the id, title, ' +
+        'equipment, measurement type and muscle groups. This is a catalog of what can be ' +
+        'logged, not a record of what Pablo did — for that use hevy_recent_activity.',
       inputSchema: {
-        query: z.string().describe('Free-text exercise name, e.g. "bench press"'),
+        query: z
+          .string()
+          .optional()
+          .describe('Exercise name, e.g. "bench press"; omit to browse a whole muscle_group'),
+        muscle_group: z
+          .enum(MUSCLE_GROUPS)
+          .optional()
+          .describe('Only exercises training this group, in either the primary or secondary role'),
         limit: z.number().int().min(1).max(100).optional().describe('Max matches (default 20)'),
       },
       annotations: { readOnlyHint: true },
     },
     async args => {
       try {
-        return jsonResult(await hevySearchExercises(getConnections().hevy.get(), args));
+        return jsonResult(
+          await hevySearchExerciseCatalog(getConnections().hevy.get(), {
+            query: args.query,
+            muscleGroup: args.muscle_group,
+            limit: args.limit,
+          }),
+        );
       } catch (error) {
-        return errorResult('Hevy exercise search failed', error);
+        return errorResult('Hevy exercise catalog search failed', error);
       }
     },
   );
@@ -429,9 +452,12 @@ export function buildServer(): McpServer {
     {
       title: 'Get a Hevy workout',
       description:
-        'Fetch one logged workout by id, with all exercises and sets. Use before ' +
-        'hevy_write_workout to see what is currently recorded.',
-      inputSchema: { workout_id: z.string().describe('Workout id') },
+        'Fetch one logged workout by id, with all exercises and sets exactly as recorded. ' +
+        "Workout ids come from hevy_recent_activity's session list. Use this when the " +
+        'muscle-group summary is not enough and the raw session is needed.',
+      inputSchema: {
+        workout_id: z.string().describe('Workout id, as returned by hevy_recent_activity'),
+      },
       annotations: { readOnlyHint: true },
     },
     async args => {
@@ -450,8 +476,10 @@ export function buildServer(): McpServer {
     {
       title: 'List Hevy routines',
       description:
-        'List all routines (reusable workout plans) with their exercises and sets, or pass ' +
-        'routine_id for one. Routines are plans; logged sessions are workouts.',
+        'List the routines (reusable workout plans), or pass routine_id for one. Each exercise ' +
+        'is summarized in one line — "3. Lat Pulldown: 4 sets of 8-12 repetitions each at 55kg. ' +
+        '90s rest." — rather than dumped set by set, keyed by its position in the plan. Routines ' +
+        'are plans; logged sessions are workouts (hevy_recent_activity).',
       inputSchema: {
         routine_id: z.string().optional().describe('One routine instead of the full list'),
       },
@@ -469,44 +497,43 @@ export function buildServer(): McpServer {
   );
 
   server.registerTool(
-    'hevy_write_workout',
+    'hevy_body_measurements',
     {
-      title: 'Create or update a Hevy workout',
+      title: 'Hevy body measurements',
       description:
-        'Log a gym session that happened. Omit workout_id to create; pass one to update. ' +
-        'Creating requires title, start_time, end_time (ISO 8601, e.g. "2026-08-06T18:00:00Z") ' +
-        'and exercises. Updating preserves every field you omit — including exercises — because ' +
-        'this reads the workout and merges your changes over it. To plan future training ' +
-        'instead of recording past training, use hevy_write_routine.',
+        'Logged body measurements, newest first: weight_kg, lean_mass_kg, fat_percent and the ' +
+        'girth fields (neck, shoulder, chest, bicep, forearm, abdomen, waist, hips, thigh, calf ' +
+        '— left/right where it applies). Entries are keyed by date and are sparse: only the ' +
+        'fields actually recorded on a date are returned, so a missing field means it was not ' +
+        'measured. Pass date for one entry, days to confine the window, or neither for the ' +
+        'latest few. Read-only — measurements are logged in the app.',
       inputSchema: {
-        workout_id: z.string().optional().describe('Update this workout; omit to create a new one'),
-        title: z.string().optional().describe('Workout title; required when creating'),
-        start_time: z.string().optional().describe('ISO 8601 start; required when creating'),
-        end_time: z.string().optional().describe('ISO 8601 end; required when creating'),
-        exercises: exercisesSchema.optional(),
-        description: z.string().optional().describe('Session notes'),
-        is_private: z.boolean().optional(),
-        exercise_mode: exerciseMode,
-        dry_run: dryRun,
+        date: z
+          .string()
+          .optional()
+          .describe('One entry by date, YYYY-MM-DD; omit for the most recent entries'),
+        days: z
+          .number()
+          .int()
+          .min(1)
+          .max(3650)
+          .optional()
+          .describe('Only entries from the last N days; omit for no time limit'),
+        limit: z.number().int().min(1).max(100).optional().describe('Max entries (default 10)'),
       },
+      annotations: { readOnlyHint: true },
     },
     async args => {
       try {
         return jsonResult(
-          await hevyWriteWorkout(getConnections().hevy.get(), {
-            workoutId: args.workout_id,
-            title: args.title,
-            startTime: args.start_time,
-            endTime: args.end_time,
-            exercises: args.exercises,
-            description: args.description,
-            isPrivate: args.is_private,
-            exerciseMode: args.exercise_mode,
-            dryRun: args.dry_run,
+          await hevyBodyMeasurements(getConnections().hevy.get(), {
+            date: args.date,
+            days: args.days,
+            limit: args.limit,
           }),
         );
       } catch (error) {
-        return errorResult('Hevy write workout failed', error);
+        return errorResult('Hevy body measurements failed', error);
       }
     },
   );
@@ -554,40 +581,6 @@ export function buildServer(): McpServer {
         );
       } catch (error) {
         return errorResult('Hevy write routine failed', error);
-      }
-    },
-  );
-
-  server.registerTool(
-    'hevy_create_custom_exercise',
-    {
-      title: 'Create a Hevy custom exercise',
-      description:
-        'Create a custom exercise template, for when hevy_search_exercises finds nothing ' +
-        'suitable. Accounts have a cap on custom exercises.',
-      inputSchema: {
-        title: z.string().describe('Exercise name, e.g. "Cable Y-Raise"'),
-        exercise_type: z.enum(CUSTOM_EXERCISE_TYPES).describe('How the exercise is measured'),
-        equipment_category: z.enum(EQUIPMENT_CATEGORIES).describe('Equipment used'),
-        muscle_group: z.enum(MUSCLE_GROUPS).describe('Primary muscle group'),
-        other_muscles: z.array(z.enum(MUSCLE_GROUPS)).optional().describe('Secondary muscles'),
-        dry_run: dryRun,
-      },
-    },
-    async args => {
-      try {
-        return jsonResult(
-          await hevyCreateCustomExercise(getConnections().hevy.get(), {
-            title: args.title,
-            exerciseType: args.exercise_type,
-            equipmentCategory: args.equipment_category,
-            muscleGroup: args.muscle_group,
-            otherMuscles: args.other_muscles,
-            dryRun: args.dry_run,
-          }),
-        );
-      } catch (error) {
-        return errorResult('Hevy create custom exercise failed', error);
       }
     },
   );

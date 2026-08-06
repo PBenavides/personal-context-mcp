@@ -2,21 +2,21 @@ import type { GoogleCalendarClient } from '../../connections/google-calendar.js'
 import type { HevyClient } from '../../connections/hevy.js';
 import type { YnabClient } from '../../connections/ynab.js';
 import {
-  buildCustomExerciseBody,
   buildExercises,
   buildRoutineBody,
-  buildWorkoutBody,
   HevyPayloadError,
+  MUSCLE_GROUPS,
   routineToWriteShape,
-  workoutToWriteShape,
   type BuiltExercise,
+  type MuscleGroup,
   type TemplateResolver,
 } from './hevy-payloads.js';
 
 /**
  * Handler logic for the personal-tools MCP, ported from `my-mcp-platform` (Python/FastMCP)
  * and consolidated: the 17-tool YNAB surface collapses into 8 intent-level tools (filters
- * become parameters instead of separate tools), Hevy keeps its 2 aggregation tools.
+ * become parameters instead of separate tools), and Hevy's two aggregations collapse into one
+ * (`hevyRecentActivity`), since answering "what have I trained lately" needed both.
  *
  * All functions take the connection client as an argument so they unit-test against fakes
  * (see `tools.test.ts`), mirroring `../personal-context/tools.ts`.
@@ -348,6 +348,10 @@ interface HevySet {
   type?: string;
   weight_kg?: number | null;
   reps?: number | null;
+  distance_meters?: number | null;
+  duration_seconds?: number | null;
+  /** Routines plan a range where workouts record a count. */
+  rep_range?: { start?: number | null; end?: number | null } | null;
 }
 
 interface HevyExercise {
@@ -357,6 +361,7 @@ interface HevyExercise {
 }
 
 interface HevyWorkout {
+  id?: string;
   title?: string;
   start_time?: string;
   end_time?: string;
@@ -371,8 +376,11 @@ interface HevyWorkoutsPage {
 interface HevyTemplate {
   id?: string;
   title?: string;
+  type?: string;
   primary_muscle_group?: string;
   secondary_muscle_groups?: string[];
+  equipment?: string;
+  is_custom?: boolean;
 }
 
 interface HevyTemplatesPage {
@@ -413,74 +421,6 @@ async function recentWorkouts(client: HevyClient, days: number): Promise<HevyWor
   return workouts;
 }
 
-/** Working sets and volume (kg) for one exercise; warmup sets excluded throughout. */
-function exerciseTotals(exercise: HevyExercise): { sets: number; volumeKg: number } {
-  let sets = 0;
-  let volumeKg = 0;
-  for (const set of exercise.sets ?? []) {
-    if (set.type === 'warmup') {
-      continue;
-    }
-    sets += 1;
-    volumeKg += (set.weight_kg ?? 0) * (set.reps ?? 0);
-  }
-  return { sets, volumeKg };
-}
-
-function durationMinutes(workout: HevyWorkout): number | null {
-  const start = Date.parse(workout.start_time ?? '');
-  const end = Date.parse(workout.end_time ?? '');
-  if (!Number.isFinite(start) || !Number.isFinite(end)) {
-    return null;
-  }
-  return Math.round(((end - start) / 60_000) * 10) / 10;
-}
-
-const round1 = (value: number): number => Math.round(value * 10) / 10;
-
-export async function hevyRecentActivity(
-  client: HevyClient,
-  args: { days?: number },
-): Promise<unknown> {
-  const days = args.days ?? 14;
-  const workouts = await recentWorkouts(client, days);
-
-  let totalSets = 0;
-  let totalVolumeKg = 0;
-  const uniqueExercises = new Set<string>();
-  const sessions = workouts.map(workout => {
-    let sessionSets = 0;
-    let sessionVolume = 0;
-    const exercises: string[] = [];
-    for (const exercise of workout.exercises ?? []) {
-      exercises.push(exercise.title ?? 'Unknown');
-      uniqueExercises.add(exercise.title ?? 'Unknown');
-      const totals = exerciseTotals(exercise);
-      sessionSets += totals.sets;
-      sessionVolume += totals.volumeKg;
-    }
-    totalSets += sessionSets;
-    totalVolumeKg += sessionVolume;
-    return {
-      title: workout.title ?? 'Untitled',
-      date: workout.start_time ?? '',
-      duration_minutes: durationMinutes(workout),
-      exercises,
-      working_sets: sessionSets,
-      volume_kg: round1(sessionVolume),
-    };
-  });
-
-  return {
-    period_days: days,
-    total_workouts: workouts.length,
-    total_working_sets: totalSets,
-    total_volume_kg: round1(totalVolumeKg),
-    unique_exercises: uniqueExercises.size,
-    sessions,
-  };
-}
-
 async function loadTemplates(client: HevyClient): Promise<Map<string, HevyTemplate>> {
   const templates = new Map<string, HevyTemplate>();
   for (let page = 1; ; page++) {
@@ -500,70 +440,294 @@ async function loadTemplates(client: HevyClient): Promise<Map<string, HevyTempla
   return templates;
 }
 
-interface MuscleAggregate {
+/** Warmups are excluded from every count, volume and summary this module produces. */
+function workingSets(exercise: HevyExercise): HevySet[] {
+  return (exercise.sets ?? []).filter(set => set.type !== 'warmup');
+}
+
+function setsVolumeKg(sets: HevySet[]): number {
+  return sets.reduce((total, set) => total + (set.weight_kg ?? 0) * (set.reps ?? 0), 0);
+}
+
+function durationMinutes(workout: HevyWorkout): number | null {
+  const start = Date.parse(workout.start_time ?? '');
+  const end = Date.parse(workout.end_time ?? '');
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    return null;
+  }
+  return Math.round(((end - start) / 60_000) * 10) / 10;
+}
+
+/** The grouping key: the workout's calendar day in UTC, `YYYY-MM-DD`. */
+function workoutDay(workout: HevyWorkout): string {
+  const started = Date.parse(workout.start_time ?? '');
+  return Number.isFinite(started) ? new Date(started).toISOString().slice(0, 10) : 'unknown';
+}
+
+const round1 = (value: number): number => Math.round(value * 10) / 10;
+
+/** Recorded values of one set field; zero and absent both mean "not recorded" in Hevy. */
+function recorded(sets: HevySet[], pick: (set: HevySet) => number | null | undefined): number[] {
+  return sets.map(pick).filter((value): value is number => typeof value === 'number' && value > 0);
+}
+
+/**
+ * One exercise's working sets as a sentence — what `depth: 1` and the routine listing return
+ * instead of a set-by-set dump, e.g. "4 sets of 10 repetitions each with min of 15kg, max of
+ * 20kg." Clauses are dropped when the field is unrecorded and duration/distance are appended in
+ * their place, so a treadmill run reads as sensibly as a bench press.
+ *
+ * A routine's planned `rep_range` and a workout's recorded `reps` both feed the rep clause, which
+ * is why "8-12" and "10" come out of the same renderer.
+ */
+function describeSets(sets: HevySet[], warmups = 0): string {
+  const parts = [`${sets.length} set${sets.length === 1 ? '' : 's'}`];
+
+  const reps = [
+    ...recorded(sets, set => set.reps),
+    ...recorded(sets, set => set.rep_range?.start),
+    ...recorded(sets, set => set.rep_range?.end),
+  ];
+  if (reps.length > 0) {
+    const [min, max] = [Math.min(...reps), Math.max(...reps)];
+    parts.push(`of ${min === max ? min : `${min}-${max}`} repetitions each`);
+  }
+
+  const weights = recorded(sets, set => set.weight_kg);
+  if (weights.length > 0) {
+    const [min, max] = [round1(Math.min(...weights)), round1(Math.max(...weights))];
+    parts.push(min === max ? `at ${min}kg` : `with min of ${min}kg, max of ${max}kg`);
+  }
+
+  const seconds = recorded(sets, set => set.duration_seconds);
+  if (seconds.length > 0) {
+    const total = seconds.reduce((sum, value) => sum + value, 0);
+    parts.push(`totalling ${round1(total / 60)} min`);
+  }
+
+  const meters = recorded(sets, set => set.distance_meters);
+  if (meters.length > 0) {
+    const total = meters.reduce((sum, value) => sum + value, 0);
+    parts.push(`over ${total >= 1000 ? `${round1(total / 1000)} km` : `${Math.round(total)} m`}`);
+  }
+
+  if (warmups > 0) {
+    parts.push(`(+${warmups} warmup${warmups === 1 ? '' : 's'})`);
+  }
+
+  return `${parts.join(' ')}.`;
+}
+
+/** First-level summarization: cardio is the `cardio` muscle group, muscles is everything else. */
+export const ACTIVITY_TYPES = ['all', 'muscles', 'cardio'] as const;
+type ActivityType = (typeof ACTIVITY_TYPES)[number];
+
+export const DEFAULT_ACTIVITY_DAYS = 4;
+/** `depth: 1` renders every set of every exercise, so the window it may span is capped. */
+export const MAX_DEEP_ACTIVITY_DAYS = 4;
+
+/** Working sets of one exercise on one day, kept until the response decides ids vs. prose. */
+interface ExerciseTally {
+  templateId: string;
+  sets: HevySet[];
+}
+
+interface MuscleDay {
   totalSets: number;
   totalVolumeKg: number;
   asPrimary: number;
   asSecondary: number;
-  exercises: Set<string>;
+  exercises: Map<string, ExerciseTally>;
 }
 
-export async function hevyActivityByMuscle(
+/**
+ * Recent training, grouped **by muscle group and then by day** — the merge of what used to be
+ * `hevy_recent_activity` (session totals) and `hevy_activity_by_muscle` (muscle breakdown).
+ *
+ * One call now answers "have I trained triceps this week, and how hard?", which previously took
+ * a muscle-group call plus a session call plus the caller's own date arithmetic. Session metadata
+ * (workout id, duration) is kept alongside the breakdown; the ids are what `hevy_get_workout`
+ * and `hevy_write_workout` need, and nothing else exposes them.
+ *
+ * `type`/`specific` choose which groups appear; `depth: 1` swaps each day's exercise-id map for a
+ * written summary of the sets. Deep output is only allowed once the window is narrowed — the two
+ * guards mirror the point of the tool, which is to stay cheap enough to call every time.
+ */
+export async function hevyRecentActivity(
   client: HevyClient,
-  args: { days?: number },
+  args: { days?: number; type?: string; depth?: number; specific?: string },
 ): Promise<unknown> {
-  const days = args.days ?? 14;
+  const days = args.days ?? DEFAULT_ACTIVITY_DAYS;
+  const depth = args.depth ?? 0;
+  const specific = args.specific?.trim().toLowerCase() || undefined;
+
+  if (depth !== 0 && depth !== 1) {
+    throw new Error(`depth must be 0 or 1 (got ${JSON.stringify(args.depth)})`);
+  }
+  if (specific && !MUSCLE_GROUPS.includes(specific as MuscleGroup)) {
+    throw new Error(
+      `unknown muscle group ${JSON.stringify(specific)}; one of: ${MUSCLE_GROUPS.join(', ')}`,
+    );
+  }
+  if (args.type !== undefined && !ACTIVITY_TYPES.includes(args.type as ActivityType)) {
+    throw new Error(`type must be one of: ${ACTIVITY_TYPES.join(', ')}`);
+  }
+
+  // A specific group implies its meta-category, so `specific: "triceps", depth: 1` — the tool's
+  // whole point — works without also having to spell out `type: "muscles"`.
+  const type: ActivityType =
+    (args.type as ActivityType | undefined) ??
+    (specific ? (specific === 'cardio' ? 'cardio' : 'muscles') : 'all');
+
+  if (specific && (specific === 'cardio') !== (type === 'cardio')) {
+    throw new Error(
+      `specific: ${JSON.stringify(specific)} contradicts type: ${JSON.stringify(type)}`,
+    );
+  }
+  if (depth === 1 && type === 'all') {
+    throw new Error(
+      'depth: 1 needs a narrower scope than type: "all" — pass type: "muscles" or "cardio", or a ' +
+        'specific muscle group',
+    );
+  }
+  if (depth === 1 && days > MAX_DEEP_ACTIVITY_DAYS) {
+    throw new Error(
+      `depth: 1 covers at most ${MAX_DEEP_ACTIVITY_DAYS} days (got ${days}); lower days, or use ` +
+        'depth: 0',
+    );
+  }
+
   const [workouts, templates] = await Promise.all([
     recentWorkouts(client, days),
     loadTemplates(client),
   ]);
 
-  const muscles = new Map<string, MuscleAggregate>();
-  const add = (group: string, role: 'primary' | 'secondary', title: string, totals: { sets: number; volumeKg: number }): void => {
-    const entry = muscles.get(group) ?? {
+  const keep = (group: string): boolean => {
+    if (specific) {
+      return group === specific;
+    }
+    if (type === 'cardio') {
+      return group === 'cardio';
+    }
+    if (type === 'muscles') {
+      return group !== 'cardio';
+    }
+    return true;
+  };
+
+  const muscles = new Map<string, Map<string, MuscleDay>>();
+  const add = (
+    group: string,
+    day: string,
+    role: 'primary' | 'secondary',
+    exercise: HevyExercise,
+    sets: HevySet[],
+  ): void => {
+    if (!keep(group)) {
+      return;
+    }
+    const byDay = muscles.get(group) ?? new Map<string, MuscleDay>();
+    const entry = byDay.get(day) ?? {
       totalSets: 0,
       totalVolumeKg: 0,
       asPrimary: 0,
       asSecondary: 0,
-      exercises: new Set<string>(),
+      exercises: new Map<string, ExerciseTally>(),
     };
-    entry.totalSets += totals.sets;
-    entry.totalVolumeKg += totals.volumeKg;
+    entry.totalSets += sets.length;
+    entry.totalVolumeKg += setsVolumeKg(sets);
     if (role === 'primary') {
-      entry.asPrimary += totals.sets;
+      entry.asPrimary += sets.length;
     } else {
-      entry.asSecondary += totals.sets;
+      entry.asSecondary += sets.length;
     }
-    entry.exercises.add(title);
-    muscles.set(group, entry);
+    const title = exercise.title ?? 'Unknown';
+    const tally = entry.exercises.get(title) ?? {
+      templateId: exercise.exercise_template_id ?? '',
+      sets: [],
+    };
+    tally.sets.push(...sets);
+    entry.exercises.set(title, tally);
+    byDay.set(day, entry);
+    muscles.set(group, byDay);
   };
 
-  for (const workout of workouts) {
+  // Session totals stay window-wide (every group, cardio included) — they answer "how much did I
+  // train", while `muscle_groups` answers "what did I train", and only that honours the filters.
+  let totalSets = 0;
+  let totalVolumeKg = 0;
+  const sessions = workouts.map(workout => {
+    const day = workoutDay(workout);
+    let sessionSets = 0;
+    let sessionVolume = 0;
     for (const exercise of workout.exercises ?? []) {
+      const sets = workingSets(exercise);
+      sessionSets += sets.length;
+      sessionVolume += setsVolumeKg(sets);
       const template = templates.get(exercise.exercise_template_id ?? '');
-      const totals = exerciseTotals(exercise);
-      const title = exercise.title ?? '';
-      add(template?.primary_muscle_group ?? 'other', 'primary', title, totals);
+      add(template?.primary_muscle_group ?? 'other', day, 'primary', exercise, sets);
       for (const secondary of template?.secondary_muscle_groups ?? []) {
-        add(secondary, 'secondary', title, totals);
+        add(secondary, day, 'secondary', exercise, sets);
       }
     }
-  }
+    totalSets += sessionSets;
+    totalVolumeKg += sessionVolume;
+    return {
+      workout_id: workout.id ?? null,
+      title: workout.title ?? 'Untitled',
+      date: day,
+      start_time: workout.start_time ?? '',
+      duration_minutes: durationMinutes(workout),
+      working_sets: sessionSets,
+      volume_kg: round1(sessionVolume),
+    };
+  });
 
-  const muscleGroups = [...muscles.entries()]
-    .sort((a, b) => b[1].totalVolumeKg - a[1].totalVolumeKg)
-    .map(([group, data]) => ({
-      muscle_group: group,
-      total_sets: data.totalSets,
-      total_volume_kg: round1(data.totalVolumeKg),
-      as_primary: data.asPrimary,
-      as_secondary: data.asSecondary,
-      exercises: [...data.exercises].sort(),
-    }));
+  const volumeOf = (byDay: Map<string, MuscleDay>): number =>
+    [...byDay.values()].reduce((total, entry) => total + entry.totalVolumeKg, 0);
+
+  const muscleGroups: Record<string, Record<string, unknown>> = {};
+  for (const [group, byDay] of [...muscles.entries()].sort(
+    (a, b) => volumeOf(b[1]) - volumeOf(a[1]),
+  )) {
+    // Newest day first, so "did I train this yesterday?" is the first thing read.
+    const dayEntries = [...byDay.entries()].sort((a, b) => b[0].localeCompare(a[0]));
+    muscleGroups[group] = Object.fromEntries(
+      dayEntries.map(([day, entry]) => {
+        const exercises = [...entry.exercises.entries()];
+        return [
+          day,
+          {
+            total_sets: entry.totalSets,
+            total_volume_kg: round1(entry.totalVolumeKg),
+            as_primary: entry.asPrimary,
+            as_secondary: entry.asSecondary,
+            ...(depth === 1
+              ? {
+                  exercises_text: Object.fromEntries(
+                    exercises.map(([title, tally]) => [title, describeSets(tally.sets)]),
+                  ),
+                }
+              : {
+                  exercises_ids: Object.fromEntries(
+                    exercises.map(([title, tally]) => [title, tally.templateId]),
+                  ),
+                }),
+          },
+        ];
+      }),
+    );
+  }
 
   return {
     period_days: days,
+    type,
+    depth,
+    ...(specific ? { specific } : {}),
     total_workouts: workouts.length,
+    total_working_sets: totalSets,
+    total_volume_kg: round1(totalVolumeKg),
+    sessions,
     muscle_groups: muscleGroups,
   };
 }
@@ -616,14 +780,76 @@ function rankTemplates(
   return scored.slice(0, limit).map(entry => entry.template);
 }
 
-export async function hevySearchExercises(
+/** Does this template train `group`, in either role? */
+function trainsMuscleGroup(template: HevyTemplate, group: string): boolean {
+  return (
+    template.primary_muscle_group === group ||
+    (template.secondary_muscle_groups ?? []).includes(group)
+  );
+}
+
+/** The catalog's own field is `id`; every write asks for `exercise_template_id`. Say so. */
+function templateResult(template: HevyTemplate): Record<string, unknown> {
+  return {
+    exercise_template_id: template.id,
+    title: template.title,
+    type: template.type,
+    primary_muscle_group: template.primary_muscle_group,
+    secondary_muscle_groups: template.secondary_muscle_groups ?? [],
+    equipment: template.equipment,
+    is_custom: template.is_custom ?? false,
+  };
+}
+
+/**
+ * Search the exercise catalog — Hevy's stock templates plus the account's custom ones — by name,
+ * by muscle group, or both. This is the only place `exercise_template_id` comes from, so every
+ * write starts here.
+ *
+ * Browsing a muscle group is a first-class case, not just a filter on a name search: "what cardio
+ * options exist" and "what else hits lats" have no name to search for. With no query, matches
+ * come back primary-role first, then secondary, each alphabetical.
+ */
+export async function hevySearchExerciseCatalog(
   client: HevyClient,
-  args: { query: string; limit?: number },
+  args: { query?: string; muscleGroup?: string; limit?: number },
 ): Promise<unknown> {
   const limit = args.limit ?? 20;
-  const templates = await loadTemplates(client);
-  const matches = rankTemplates(templates, args.query, limit);
-  return { query: args.query, match_count: matches.length, matches };
+  const query = args.query?.trim() ?? '';
+  const muscleGroup = args.muscleGroup?.trim().toLowerCase() || undefined;
+
+  if (!query && !muscleGroup) {
+    throw new Error('pass query (an exercise name), muscle_group, or both');
+  }
+  if (muscleGroup && !MUSCLE_GROUPS.includes(muscleGroup as MuscleGroup)) {
+    throw new Error(
+      `unknown muscle group ${JSON.stringify(muscleGroup)}; one of: ${MUSCLE_GROUPS.join(', ')}`,
+    );
+  }
+
+  const all = await loadTemplates(client);
+  const scoped = muscleGroup
+    ? new Map([...all].filter(([, template]) => trainsMuscleGroup(template, muscleGroup)))
+    : all;
+
+  const matches = query
+    ? rankTemplates(scoped, query, limit)
+    : [...scoped.values()]
+        .sort(
+          (a, b) =>
+            Number(b.primary_muscle_group === muscleGroup) -
+              Number(a.primary_muscle_group === muscleGroup) ||
+            (a.title ?? '').localeCompare(b.title ?? ''),
+        )
+        .slice(0, limit);
+
+  return {
+    ...(query ? { query } : {}),
+    ...(muscleGroup ? { muscle_group: muscleGroup } : {}),
+    match_count: matches.length,
+    ...(muscleGroup && !query ? { total_in_group: scoped.size } : {}),
+    matches: matches.map(templateResult),
+  };
 }
 
 /**
@@ -636,7 +862,7 @@ function templateResolver(templates: Map<string, HevyTemplate>): TemplateResolve
     if (matches.length === 0) {
       throw new HevyPayloadError(
         `no exercise template matches ${JSON.stringify(name)}; search with ` +
-          'hevy_search_exercises, or create one with hevy_create_custom_exercise',
+          'hevy_search_exercise_catalog, or create one with hevy_create_custom_exercise',
       );
     }
     const needle = name.trim().toLowerCase();
@@ -694,11 +920,25 @@ function mergeExercises(
   return mode === 'append' ? [...existing, ...incoming] : incoming;
 }
 
+/**
+ * One logged workout in full. Ids come from `hevy_recent_activity`'s session list — nothing else
+ * in the surface exposes them. Tolerates the envelope some Hevy read endpoints wrap results in.
+ */
 export async function hevyGetWorkout(
   client: HevyClient,
   args: { workoutId: string },
 ): Promise<unknown> {
-  return client.get(`/v1/workouts/${args.workoutId}`);
+  const resp = (await client.get(`/v1/workouts/${args.workoutId}`)) as { workout?: unknown };
+  return resp?.workout ?? resp;
+}
+
+interface HevyRoutineExercise {
+  title?: string;
+  exercise_template_id?: string;
+  notes?: string | null;
+  rest_seconds?: string | number | null;
+  supersets_id?: number | null;
+  sets?: HevySet[];
 }
 
 interface HevyRoutine {
@@ -706,12 +946,66 @@ interface HevyRoutine {
   title?: string;
   notes?: string | null;
   folder_id?: number | null;
-  exercises?: unknown[];
+  exercises?: HevyRoutineExercise[];
 }
 
 interface HevyRoutinesPage {
   routines?: HevyRoutine[];
   page_count?: number;
+}
+
+/**
+ * One planned exercise as a sentence: its sets, then rest and superset when the routine sets
+ * them. Warmups are counted rather than described — they are part of the plan, but not the point
+ * of it.
+ */
+function describeRoutineExercise(exercise: HevyRoutineExercise): string {
+  const sets = exercise.sets ?? [];
+  const working = sets.filter(set => set.type !== 'warmup');
+  const warmups = sets.length - working.length;
+
+  const parts = [
+    working.length > 0
+      ? describeSets(working, warmups)
+      : `${warmups} warmup set${warmups === 1 ? '' : 's'} only.`,
+  ];
+
+  const rest = Number(exercise.rest_seconds);
+  if (Number.isFinite(rest) && rest > 0) {
+    parts.push(`${Math.trunc(rest)}s rest.`);
+  }
+  if (exercise.supersets_id !== null && exercise.supersets_id !== undefined) {
+    parts.push(`Superset ${exercise.supersets_id}.`);
+  }
+  if (exercise.notes) {
+    parts.push(`Note: ${exercise.notes}`);
+  }
+  return parts.join(' ');
+}
+
+/**
+ * A routine as a plan you can read, not a set-by-set dump: each exercise becomes one sentence,
+ * keyed by its position so the order of the plan survives and two entries for the same movement
+ * stay distinct. Null fields are omitted entirely rather than shown as null.
+ */
+function summarizeRoutine(routine: HevyRoutine): Record<string, unknown> {
+  const exercises = routine.exercises ?? [];
+  return {
+    routine_id: routine.id,
+    title: routine.title ?? 'Untitled',
+    ...(routine.folder_id === null || routine.folder_id === undefined
+      ? {}
+      : { folder_id: routine.folder_id }),
+    ...(routine.notes ? { notes: routine.notes } : {}),
+    exercise_count: exercises.length,
+    total_sets: exercises.reduce((total, exercise) => total + (exercise.sets ?? []).length, 0),
+    exercises: Object.fromEntries(
+      exercises.map((exercise, index) => [
+        `${index + 1}. ${exercise.title ?? 'Unknown'}`,
+        describeRoutineExercise(exercise),
+      ]),
+    ),
+  };
 }
 
 /** All routines, or one when `routineId` is given. `GET /v1/routines/{id}` wraps its result. */
@@ -723,7 +1017,7 @@ export async function hevyRoutines(
     const resp = (await client.get(`/v1/routines/${args.routineId}`)) as {
       routine?: HevyRoutine;
     };
-    return resp.routine ?? resp;
+    return summarizeRoutine(resp.routine ?? (resp as HevyRoutine));
   }
   const routines: HevyRoutine[] = [];
   for (let page = 1; ; page++) {
@@ -736,7 +1030,97 @@ export async function hevyRoutines(
       break;
     }
   }
-  return { routine_count: routines.length, routines };
+  return { routine_count: routines.length, routines: routines.map(summarizeRoutine) };
+}
+
+// ---------------------------------------------------------------------------
+// Hevy — body measurements
+// ---------------------------------------------------------------------------
+
+interface HevyMeasurement {
+  date?: string;
+  [field: string]: unknown;
+}
+
+interface HevyMeasurementsPage {
+  body_measurements?: HevyMeasurement[];
+  page_count?: number;
+}
+
+/** Bookkeeping the API returns but nothing can be done with — measurements are keyed by date. */
+const MEASUREMENT_NOISE_FIELDS = new Set(['id', 'created_at', 'updated_at']);
+
+/**
+ * Drop nulls and bookkeeping, keep everything else. Most of the ~18 measurement fields are null
+ * on any given entry, and passing the rest through unshaped means a field Hevy adds later shows
+ * up without a code change.
+ */
+function shapeMeasurement(measurement: HevyMeasurement): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(measurement).filter(
+      ([field, value]) => value !== null && value !== undefined && !MEASUREMENT_NOISE_FIELDS.has(field),
+    ),
+  );
+}
+
+/** `/v1/body_measurements` pages at 10; this bounds a full sweep at 250 entries. */
+export const MAX_MEASUREMENT_PAGES = 25;
+
+/**
+ * Logged body measurements — weight, lean mass, body fat and the girth fields — newest first.
+ *
+ * `date` fetches one entry; otherwise the window is the most recent `limit` entries, optionally
+ * confined to the last `days`. The API documents no ordering for the list, so this sweeps the
+ * pages and sorts by date rather than trusting a guess (measurements are sparse, so the sweep is
+ * a handful of requests).
+ */
+export async function hevyBodyMeasurements(
+  client: HevyClient,
+  args: { date?: string; days?: number; limit?: number },
+): Promise<unknown> {
+  if (args.date) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(args.date)) {
+      throw new Error(`date must be YYYY-MM-DD, got ${JSON.stringify(args.date)}`);
+    }
+    const resp = (await client.get(`/v1/body_measurements/${args.date}`)) as {
+      body_measurement?: HevyMeasurement;
+    };
+    return { measurement: shapeMeasurement(resp?.body_measurement ?? (resp as HevyMeasurement)) };
+  }
+
+  const limit = args.limit ?? 10;
+  const entries: HevyMeasurement[] = [];
+  let truncated = false;
+  for (let page = 1; ; page++) {
+    const resp = (await client.get('/v1/body_measurements', {
+      page: String(page),
+      pageSize: '10',
+    })) as HevyMeasurementsPage;
+    entries.push(...(resp.body_measurements ?? []));
+    if (page >= (resp.page_count ?? page)) {
+      break;
+    }
+    if (page >= MAX_MEASUREMENT_PAGES) {
+      truncated = true;
+      break;
+    }
+  }
+
+  entries.sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+
+  const cutoff = args.days === undefined ? undefined : Date.now() - args.days * 86_400_000;
+  const windowed =
+    cutoff === undefined
+      ? entries
+      : entries.filter(entry => Date.parse(entry.date ?? '') >= cutoff);
+
+  return {
+    ...(args.days === undefined ? {} : { period_days: args.days }),
+    total_recorded: entries.length,
+    entry_count: Math.min(windowed.length, limit),
+    ...(truncated ? { truncated: true } : {}),
+    measurements: windowed.slice(0, limit).map(shapeMeasurement),
+  };
 }
 
 interface HevyFolder {
@@ -859,87 +1243,6 @@ export async function hevyWriteRoutine(
   });
   const endpoint = `/v1/routines/${args.routineId}`;
   return args.dryRun ? dryRunResult('PUT', endpoint, body) : client.put(endpoint, body);
-}
-
-/**
- * Log a workout, or update one when `workoutId` is given. On update, fields left undefined keep
- * their current value.
- */
-export async function hevyWriteWorkout(
-  client: HevyClient,
-  args: {
-    workoutId?: string;
-    title?: string;
-    startTime?: string;
-    endTime?: string;
-    exercises?: unknown;
-    description?: string;
-    isPrivate?: boolean;
-    exerciseMode?: ExerciseMode;
-    dryRun?: boolean;
-  },
-): Promise<unknown> {
-  const resolve = await resolverIfNeeded(client, args.exercises);
-  const built =
-    args.exercises === undefined ? undefined : buildExercises(args.exercises, false, resolve);
-
-  if (!args.workoutId) {
-    if (built === undefined) {
-      throw new HevyPayloadError('logging a workout requires exercises');
-    }
-    const body = buildWorkoutBody({
-      title: args.title ?? '',
-      startTime: args.startTime ?? '',
-      endTime: args.endTime ?? '',
-      exercises: built,
-      description: args.description,
-      isPrivate: args.isPrivate,
-    });
-    return args.dryRun
-      ? dryRunResult('POST', '/v1/workouts', body)
-      : client.post('/v1/workouts', body);
-  }
-
-  const current = (await client.get(`/v1/workouts/${args.workoutId}`)) as HevyWorkout & {
-    description?: string | null;
-  };
-  const body = buildWorkoutBody({
-    title: args.title ?? current.title ?? '',
-    startTime: args.startTime ?? current.start_time ?? '',
-    endTime: args.endTime ?? current.end_time ?? '',
-    exercises: mergeExercises(
-      workoutToWriteShape(current as { exercises?: [] }),
-      built,
-      args.exerciseMode ?? 'replace',
-    ),
-    description: args.description ?? current.description ?? undefined,
-    isPrivate: args.isPrivate,
-  });
-  const endpoint = `/v1/workouts/${args.workoutId}`;
-  return args.dryRun ? dryRunResult('PUT', endpoint, body) : client.put(endpoint, body);
-}
-
-export async function hevyCreateCustomExercise(
-  client: HevyClient,
-  args: {
-    title: string;
-    exerciseType: string;
-    equipmentCategory: string;
-    muscleGroup: string;
-    otherMuscles?: string[];
-    dryRun?: boolean;
-  },
-): Promise<unknown> {
-  const body = buildCustomExerciseBody({
-    title: args.title,
-    exerciseType: args.exerciseType,
-    equipmentCategory: args.equipmentCategory,
-    muscleGroup: args.muscleGroup,
-    otherMuscles: args.otherMuscles,
-  });
-  return args.dryRun
-    ? dryRunResult('POST', '/v1/exercise_templates', body)
-    : client.post('/v1/exercise_templates', body);
 }
 
 // ---------------------------------------------------------------------------

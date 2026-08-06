@@ -7,7 +7,7 @@ from the Python/FastMCP server in
 alongside `/personal-context`.
 
 ```
-client ──POST /personal-tools (Bearer token)──► ynab_* (8) / hevy_* (8) / gcal_* (7)
+client ──POST /personal-tools (Bearer token)──► ynab_* (8) / hevy_* (7) / gcal_* (7)
                                                      │           │            │
                                           api.ynab.com/v1  api.hevyapp.com  googleapis.com/calendar/v3
                                           (YNAB_TOKEN)     (HEVY_API_KEY)   (OAuth refresh token)
@@ -22,7 +22,7 @@ no Python-specific SDKs:
 | Integration | Auth | Portable to JS? | Status |
 |---|---|---|---|
 | YNAB | Static bearer token (`YNAB_TOKEN`) | ✅ trivially — plain REST | **Ported** (8 tools) |
-| Hevy | Static API key (`api-key` header, `HEVY_API_KEY`) | ✅ trivially — plain REST | **Ported** (8 tools: 2 aggregations, 3 reads, 3 writes) |
+| Hevy | Static API key (`api-key` header, `HEVY_API_KEY`) | ✅ trivially — plain REST | **Ported** (7 tools: 1 aggregation, 3 reads, 3 writes) |
 | Google Calendar | Google OAuth refresh token + client id/secret | ✅ ported — plain REST + one refresh-token exchange | **Ported** (7 tools) |
 | Google Sheets | Same Google OAuth token flow | ✅ possible, needs token plumbing | **Skipped** (see below) |
 | Auth0 OAuth server (DCR, callback, scopes) | — | n/a | **Skipped by design** — this host uses its static bearer + Tailscale model instead |
@@ -84,29 +84,73 @@ session that happened, a **routine** is a reusable plan.
 
 | Tool | Parameters | Purpose |
 |---|---|---|
-| `hevy_recent_activity` | `days?` (default 14) | Total workouts / working sets / volume (kg) + per-session breakdown. Warmup sets excluded. |
-| `hevy_activity_by_muscle` | `days?` (default 14) | Sets + volume per muscle group (primary/secondary via Hevy exercise templates), sorted by volume. |
-| `hevy_search_exercises` | `query`, `limit?` (20) | Exercise templates by name → `exercise_template_id`. The entry point for every write. |
+| `hevy_recent_activity` | `days?` (default 4), `type?`, `depth?`, `specific?` | Recent training grouped by muscle group → day, plus each session's `workout_id` and duration. Warmup sets excluded. |
+| `hevy_search_exercise_catalog` | `query?`, `muscle_group?`, `limit?` (20) | The exercise catalog by name and/or muscle group → `exercise_template_id`. The entry point for every write. |
 | `hevy_get_workout` | `workout_id` | One logged workout with all exercises and sets. |
 | `hevy_routines` | `routine_id?` | All routines, or one. |
 | `hevy_write_workout` | `workout_id?`, `title?`, `start_time?`, `end_time?`, `exercises?`, `description?`, `is_private?`, `exercise_mode?`, `dry_run?` | Log a session; updates when `workout_id` is passed. |
 | `hevy_write_routine` | `routine_id?`, `title?`, `exercises?`, `notes?`, `folder_name?`, `create_folder?`, `exercise_mode?`, `dry_run?` | Create a plan; updates when `routine_id` is passed. |
 | `hevy_create_custom_exercise` | `title`, `exercise_type`, `equipment_category`, `muscle_group`, `other_muscles?`, `dry_run?` | Custom template when no stock exercise fits. |
 
-The two aggregation tools paginate `/v1/workouts` newest-first (pages of 10) and
-stop at the first workout older than the window; the muscle tool additionally
-loads all exercise templates (pages of 100) to map `exercise_template_id` →
-muscle groups.
-
 Create and update are one tool per entity rather than two, consistent with how
 the YNAB surface was consolidated: the presence of an id decides the verb.
+
+#### Reading recent training
+
+`hevy_recent_activity` is the merge of what used to be two tools —
+`hevy_recent_activity` (session totals) and `hevy_activity_by_muscle` (muscle
+breakdown). Answering "have I trained triceps this week, and how hard?" took a
+call to each plus the caller's own date arithmetic; it is now one call, because
+the breakdown is keyed **by muscle group and then by day**:
+
+```jsonc
+{
+  "period_days": 4, "type": "all", "depth": 0,
+  "total_workouts": 2, "total_working_sets": 21, "total_volume_kg": 9557,
+  "sessions": [
+    {"workout_id": "b459…", "title": "Push", "date": "2026-08-04",
+     "duration_minutes": 63.5, "working_sets": 21, "volume_kg": 9557}
+  ],
+  "muscle_groups": {
+    "triceps": {
+      "2026-08-04": {
+        "total_sets": 20, "total_volume_kg": 9557, "as_primary": 16, "as_secondary": 4,
+        "exercises_ids": {"Bench Press (Barbell)": "79D0BB3A"}
+      }
+    }
+  }
+}
+```
+
+- **`type`** — `all` (default), `muscles` (everything except cardio), or
+  `cardio`. **`specific`** narrows to a single group and implies its `type`, so
+  `specific: "triceps"` alone is enough.
+- **`depth: 1`** replaces `exercises_ids` with `exercises_text` — each exercise's
+  sets in words, e.g. `"4 sets of 10 repetitions each with min of 15kg, max of
+  20kg."`, and duration/distance instead for cardio. It costs a line per
+  exercise, so it is refused unless the scope is narrowed (not `type: "all"`)
+  and `days <= 4`.
+- Groups are ordered by volume, days newest-first. Days are UTC calendar days.
+- `sessions` and the top-level totals stay **window-wide** whatever the
+  breakdown is filtered to: they answer "how much did I train", while
+  `muscle_groups` answers "what did I train".
+- `workout_id` is exposed here and nowhere else — it is what `hevy_get_workout`
+  and `hevy_write_workout` need.
+
+Both this and `hevy_search_exercise_catalog` paginate `/v1/workouts` newest-first
+(pages of 10), stopping at the first workout older than the window, and load all
+exercise templates (pages of 100) to map `exercise_template_id` → muscle groups.
+`hevy_search_exercise_catalog` covers stock and custom templates, matches on name
+(exact, then prefix, then substring) and/or on `muscle_group` in either the
+primary or secondary role, and returns the id as `exercise_template_id` — the
+name the write tools ask for.
 
 #### Writing
 
 Every write follows the same three steps:
 
 1. **Resolve** — exercises are addressed by `exercise_template_id`. Either call
-   `hevy_search_exercises`, or pass `exercise: "<name>"` and let it resolve. An
+   `hevy_search_exercise_catalog`, or pass `exercise: "<name>"` and let it resolve. An
    ambiguous name is refused with the candidates listed rather than guessed at.
 2. **Build** — `hevy-payloads.ts` constructs and validates the body. It is pure,
    so a bad payload throws before any request is made.
@@ -237,14 +281,18 @@ claude mcp add --transport http personal-tools http://localhost:3000/personal-to
 
 - `npm test` — unit tests over the handlers (compact/verbose transactions,
   scope precedence, report math, Hevy pagination cutoff + warmup exclusion +
-  muscle mapping, Hevy payload validation + read/write shape round trip +
+  muscle/day grouping + depth and type guards + catalog browse by muscle group,
+  Hevy payload validation + read/write shape round trip +
   create/update dispatch + merge semantics, Calendar event
   formatting/pagination/all-day inference, `google-calendar.ts` token exchange
   + caching + refresh + error surfacing).
 - Live smoke (2026-07-19, real tokens): `tools/list` returned the 10 YNAB/Hevy
   tools; `ynab_report kind=net_worth` returned the real 4-account net worth;
-  `hevy_activity_by_muscle days=365` aggregated 42 workouts with correct
-  per-muscle ordering; unconfigured runs return clean `isError` results.
+  the muscle-group aggregation over 365 days covered 42 workouts with correct
+  per-muscle ordering; unconfigured runs return clean `isError` results. That
+  smoke predates the 2026-08-06 read-tool reshape (two aggregations merged into
+  `hevy_recent_activity`, `hevy_search_exercises` →
+  `hevy_search_exercise_catalog`), which is covered by unit tests only so far.
 - Hevy writes, live dry-run against the real account (2026-08-06): renaming a
   7-exercise / 28-set routine preserved all 7 and 28 with `folder_id` correctly
   absent and no read-shape keys leaking; `exercise_mode: "append"` produced 8;
