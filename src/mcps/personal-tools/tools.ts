@@ -2,6 +2,14 @@ import type { GoogleCalendarClient } from '../../connections/google-calendar.js'
 import type { HevyClient } from '../../connections/hevy.js';
 import type { YnabClient } from '../../connections/ynab.js';
 import {
+  DEFAULT_ENERGY_MODEL,
+  estimateWorkoutEnergy,
+  type BodyComposition,
+  type EnergyModel,
+  type EnergyTemplate,
+  type EnergyWorkout,
+} from './hevy-energy.js';
+import {
   buildExercises,
   buildRoutineBody,
   HevyPayloadError,
@@ -732,6 +740,79 @@ export async function hevyRecentActivity(
   };
 }
 
+/**
+ * Estimated energy cost of one logged workout.
+ *
+ * Fetches three things and hands them to the pure model in `hevy-energy.ts`: the workout, the
+ * exercise templates (for the muscle groups that scale each exercise's cost), and the latest body
+ * measurement (for a personalized resting rate). Explicit body arguments win over the measurement,
+ * which is the escape hatch when Hevy's is stale or missing.
+ *
+ * The result always carries `accuracy_note` and a `warnings` list — the estimate is weak enough
+ * that shipping the number without them would be misleading.
+ */
+export async function hevyCalculateBurntCalories(
+  client: HevyClient,
+  args: {
+    workoutId: string;
+    weightKg?: number;
+    fatPercent?: number;
+    leanMassKg?: number;
+  },
+  model: EnergyModel = DEFAULT_ENERGY_MODEL,
+): Promise<unknown> {
+  const wantsMeasurement = args.weightKg === undefined || args.leanMassKg === undefined;
+
+  const [workoutResp, templates, measurement] = await Promise.all([
+    client.get(`/v1/workouts/${args.workoutId}`) as Promise<{ workout?: EnergyWorkout }>,
+    loadTemplates(client),
+    wantsMeasurement
+      ? latestMeasurement(client).catch(() => undefined)
+      : Promise.resolve(undefined),
+  ]);
+
+  const workout = (workoutResp?.workout ?? workoutResp) as EnergyWorkout | undefined;
+  if (!workout || (!workout.id && !workout.start_time && !workout.exercises)) {
+    throw new Error(
+      `no workout found for id ${JSON.stringify(args.workoutId)}; ids come from ` +
+        "hevy_recent_activity's session list",
+    );
+  }
+
+  const body: BodyComposition = {
+    weightKg: args.weightKg ?? numeric(measurement?.weight_kg),
+    leanMassKg: args.leanMassKg ?? numeric(measurement?.lean_mass_kg),
+    fatPercent: args.fatPercent ?? numeric(measurement?.fat_percent),
+    measuredOn:
+      args.weightKg === undefined && args.leanMassKg === undefined
+        ? measurement?.date
+        : undefined,
+  };
+
+  if (body.weightKg === undefined && body.leanMassKg === undefined) {
+    throw new Error(
+      'no body mass available: the Hevy account has no body measurement with a weight. Log one ' +
+        'in the app, or pass weight_kg (and ideally fat_percent) to this tool.',
+    );
+  }
+
+  const estimate = estimateWorkoutEnergy(
+    workout,
+    templates as Map<string, EnergyTemplate>,
+    body,
+    model,
+  );
+
+  if (args.weightKg !== undefined || args.leanMassKg !== undefined || args.fatPercent !== undefined) {
+    estimate.warnings.push('Body composition was supplied by the caller, not read from Hevy.');
+  }
+  return estimate;
+}
+
+function numeric(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Hevy — writes
 // ---------------------------------------------------------------------------
@@ -1065,6 +1146,29 @@ function shapeMeasurement(measurement: HevyMeasurement): Record<string, unknown>
 
 /** `/v1/body_measurements` pages at 10; this bounds a full sweep at 250 entries. */
 export const MAX_MEASUREMENT_PAGES = 25;
+
+/**
+ * The most recent measurement, or undefined when none is logged. Only the first page is read —
+ * whichever end the newest entry sits on, it is on page 1 or the last page, and the caller only
+ * needs a body mass, so a full sweep would be wasteful here.
+ */
+async function latestMeasurement(client: HevyClient): Promise<HevyMeasurement | undefined> {
+  const first = (await client.get('/v1/body_measurements', {
+    page: '1',
+    pageSize: '10',
+  })) as HevyMeasurementsPage;
+  const entries = [...(first.body_measurements ?? [])];
+  const pageCount = first.page_count ?? 1;
+  if (pageCount > 1) {
+    const last = (await client.get('/v1/body_measurements', {
+      page: String(pageCount),
+      pageSize: '10',
+    })) as HevyMeasurementsPage;
+    entries.push(...(last.body_measurements ?? []));
+  }
+  entries.sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+  return entries[0];
+}
 
 /**
  * Logged body measurements — weight, lean mass, body fat and the girth fields — newest first.

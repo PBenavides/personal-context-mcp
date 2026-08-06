@@ -14,6 +14,7 @@ import {
   gcalListEvents,
   gcalUpdateEvent,
   hevyBodyMeasurements,
+  hevyCalculateBurntCalories,
   hevyGetWorkout,
   hevyRecentActivity,
   hevyRoutines,
@@ -38,7 +39,7 @@ const INSTRUCTIONS =
   'server. Three integrations: YNAB budgeting (ynab_* — budgets, accounts, transactions, ' +
   'categories, payees, scheduled transactions, aggregated reports), Hevy workout tracking ' +
   '(hevy_* — recent training by muscle group and day, logged workouts, routines, body ' +
-  'measurements, and exercise-catalog search), and Google Calendar (gcal_* — list ' +
+  'measurements, a calorie estimate, and exercise-catalog search), and Google Calendar (gcal_* — list ' +
   'calendars/events, get/create/update/delete an event, free/busy lookup). Raw YNAB amounts ' +
   'are in milliunits (1000 = one currency unit); ynab_report already converts to currency ' +
   'units. Most ynab_* tools default to the last-used budget — call ynab_budgets only when ' +
@@ -47,7 +48,9 @@ const INSTRUCTIONS =
   'and updates one when it is, preserving any field you omit; exercises there are addressed by ' +
   'exercise_template_id, so call hevy_search_exercise_catalog first (or pass a name and let it ' +
   'resolve), and dry_run previews the request body. Hevy cannot log or edit a workout, create a ' +
-  'custom exercise, or delete anything — those happen in the app.';
+  'custom exercise, or delete anything — those happen in the app. ' +
+  'hevy_calculate_burnt_calories returns a rough estimate (±20-30%): always report its ' +
+  'accuracy_note and warnings with the number rather than presenting it as measured.';
 
 interface TextResult {
   [key: string]: unknown;
@@ -534,6 +537,56 @@ export function buildServer(): McpServer {
         );
       } catch (error) {
         return errorResult('Hevy body measurements failed', error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'hevy_calculate_burnt_calories',
+    {
+      title: 'Estimate calories burnt in a Hevy workout',
+      description:
+        'Estimate the energy cost of one logged workout. Scales each exercise by how much muscle ' +
+        'it recruits (squats cost more than wrist curls), charges time under tension and rest ' +
+        'separately, derives cardio intensity from actual pace, and personalizes the resting rate ' +
+        "from Hevy's latest body measurement (Katch-McArdle on lean mass when body fat is " +
+        'logged). Workout ids come from hevy_recent_activity. IMPORTANT: the result is a rough ' +
+        'estimate, ±20-30% at best and weakest for resistance training — always report the ' +
+        'accuracy_note and any warnings alongside the number, and treat it as a way to compare ' +
+        'sessions rather than a calorie budget.',
+      inputSchema: {
+        workout_id: z.string().describe('Workout id, as returned by hevy_recent_activity'),
+        weight_kg: z
+          .number()
+          .positive()
+          .optional()
+          .describe('Override body weight instead of using the latest Hevy measurement'),
+        fat_percent: z
+          .number()
+          .min(1)
+          .max(75)
+          .optional()
+          .describe('Body fat %; enables the lean-mass resting rate when Hevy has none logged'),
+        lean_mass_kg: z
+          .number()
+          .positive()
+          .optional()
+          .describe('Lean body mass; the most accurate input, overrides weight/fat'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async args => {
+      try {
+        return jsonResult(
+          await hevyCalculateBurntCalories(getConnections().hevy.get(), {
+            workoutId: args.workout_id,
+            weightKg: args.weight_kg,
+            fatPercent: args.fat_percent,
+            leanMassKg: args.lean_mass_kg,
+          }),
+        );
+      } catch (error) {
+        return errorResult('Hevy calorie estimate failed', error);
       }
     },
   );
