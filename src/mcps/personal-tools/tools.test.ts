@@ -11,6 +11,10 @@ import {
   gcalUpdateEvent,
   hevyActivityByMuscle,
   hevyRecentActivity,
+  hevyRoutines,
+  hevySearchExercises,
+  hevyWriteRoutine,
+  hevyWriteWorkout,
   ynabCategories,
   ynabCreateTransaction,
   ynabReport,
@@ -225,24 +229,60 @@ describe('ynabReport', () => {
   });
 });
 
-/** Fake Hevy client serving paginated workouts and templates. */
+interface HevyCall {
+  method: string;
+  endpoint: string;
+  body?: unknown;
+}
+
+/**
+ * Fake Hevy client serving paginated workouts, templates, routines and folders, plus exact
+ * endpoint lookups via `byId`. Records every call so write tests can assert on method, endpoint
+ * and body — no request should reach it at all when payload validation fails.
+ */
 function fakeHevy(opts: {
-  workoutPages: unknown[][];
+  workoutPages?: unknown[][];
   templates?: unknown[];
-}): HevyClient {
+  routinePages?: unknown[][];
+  folderPages?: unknown[][];
+  byId?: Record<string, unknown>;
+  writeResult?: unknown;
+}): HevyClient & { calls: HevyCall[] } {
+  const calls: HevyCall[] = [];
+  const paged = (pages: unknown[][] | undefined, key: string, page: number): unknown => ({
+    [key]: pages?.[page - 1] ?? [],
+    page_count: Math.max(pages?.length ?? 1, 1),
+  });
+
   return {
+    calls,
     async get(endpoint, params) {
+      calls.push({ method: 'GET', endpoint });
       const page = Number(params?.page ?? '1');
       if (endpoint === '/v1/workouts') {
-        return {
-          workouts: opts.workoutPages[page - 1] ?? [],
-          page_count: opts.workoutPages.length,
-        };
+        return paged(opts.workoutPages, 'workouts', page);
       }
       if (endpoint === '/v1/exercise_templates') {
         return { exercise_templates: page === 1 ? (opts.templates ?? []) : [], page_count: 1 };
       }
+      if (endpoint === '/v1/routines') {
+        return paged(opts.routinePages, 'routines', page);
+      }
+      if (endpoint === '/v1/routine_folders') {
+        return paged(opts.folderPages, 'routine_folders', page);
+      }
+      if (opts.byId && endpoint in opts.byId) {
+        return opts.byId[endpoint];
+      }
       throw new Error(`Unexpected endpoint: ${endpoint}`);
+    },
+    async post(endpoint, body) {
+      calls.push({ method: 'POST', endpoint, body });
+      return opts.writeResult ?? { ok: true };
+    },
+    async put(endpoint, body) {
+      calls.push({ method: 'PUT', endpoint, body });
+      return opts.writeResult ?? { ok: true };
     },
   };
 }
@@ -343,6 +383,325 @@ describe('hevyActivityByMuscle', () => {
     const result = (await hevyActivityByMuscle(client, {})) as Record<string, unknown>;
     const groups = result.muscle_groups as { muscle_group: string }[];
     expect(groups.map(group => group.muscle_group)).toEqual(['other']);
+  });
+});
+
+const TEMPLATES = [
+  { id: '79D0BB3A', title: 'Bench Press (Barbell)', primary_muscle_group: 'chest' },
+  { id: '3601968B', title: 'Bench Press (Dumbbell)', primary_muscle_group: 'chest' },
+  { id: 'D04AC939', title: 'Squat (Barbell)', primary_muscle_group: 'quadriceps' },
+];
+
+describe('hevySearchExercises', () => {
+  it('ranks an exact title first', async () => {
+    const client = fakeHevy({ templates: TEMPLATES });
+    const result = (await hevySearchExercises(client, { query: 'Bench Press (Barbell)' })) as {
+      match_count: number;
+      matches: { id: string }[];
+    };
+    expect(result.matches[0].id).toBe('79D0BB3A');
+    // "(barbell)" excludes the dumbbell variant, so the full title matches exactly one template.
+    expect(result.match_count).toBe(1);
+  });
+
+  it('returns both variants for a partial name, shortest title first', async () => {
+    const client = fakeHevy({ templates: TEMPLATES });
+    const result = (await hevySearchExercises(client, { query: 'bench press' })) as {
+      match_count: number;
+      matches: { id: string }[];
+    };
+    expect(result.match_count).toBe(2);
+    expect(result.matches[0].id).toBe('79D0BB3A');
+  });
+
+  it('honours the limit', async () => {
+    const client = fakeHevy({ templates: TEMPLATES });
+    const result = (await hevySearchExercises(client, { query: 'bench press', limit: 1 })) as {
+      match_count: number;
+    };
+    expect(result.match_count).toBe(1);
+  });
+
+  it('returns nothing for a query that matches no template', async () => {
+    const client = fakeHevy({ templates: TEMPLATES });
+    const result = (await hevySearchExercises(client, { query: 'deadlift' })) as {
+      match_count: number;
+    };
+    expect(result.match_count).toBe(0);
+  });
+});
+
+describe('hevyRoutines', () => {
+  it('paginates the full list', async () => {
+    const client = fakeHevy({
+      routinePages: [[{ id: 'r1' }, { id: 'r2' }], [{ id: 'r3' }]],
+    });
+    const result = (await hevyRoutines(client, {})) as { routine_count: number };
+    expect(result.routine_count).toBe(3);
+  });
+
+  it('unwraps the single-routine envelope', async () => {
+    const client = fakeHevy({ byId: { '/v1/routines/r1': { routine: { id: 'r1', title: 'A' } } } });
+    expect(await hevyRoutines(client, { routineId: 'r1' })).toEqual({ id: 'r1', title: 'A' });
+  });
+});
+
+/** A routine as the API returns it: read-shape keys, server-assigned index/title. */
+const FETCHED_ROUTINE = {
+  routine: {
+    id: 'r1',
+    title: 'Upper A',
+    notes: 'keep form',
+    folder_id: 42,
+    exercises: [
+      {
+        index: 0,
+        title: 'Bench Press (Barbell)',
+        exercise_template_id: '79D0BB3A',
+        supersets_id: 1,
+        rest_seconds: '90',
+        sets: [
+          { index: 0, type: 'warmup', weight_kg: 20, reps: 10 },
+          { index: 1, type: 'normal', weight_kg: 60, reps: 8 },
+        ],
+      },
+      {
+        index: 1,
+        title: 'Squat (Barbell)',
+        exercise_template_id: 'D04AC939',
+        supersets_id: null,
+        sets: [{ index: 0, type: 'normal', weight_kg: 80, reps: 5 }],
+      },
+    ],
+  },
+};
+
+describe('hevyWriteRoutine', () => {
+  it('POSTs a new routine when no id is given, resolving names', async () => {
+    const client = fakeHevy({ templates: TEMPLATES });
+    await hevyWriteRoutine(client, {
+      title: 'Leg Day',
+      exercises: [{ exercise: 'Squat (Barbell)', sets: 3, reps: 5, weight_kg: 80 }],
+    });
+    const write = client.calls.find(call => call.method === 'POST');
+    expect(write?.endpoint).toBe('/v1/routines');
+    const body = write?.body as { routine: { exercises: { exercise_template_id: string }[] } };
+    expect(body.routine.exercises[0].exercise_template_id).toBe('D04AC939');
+    expect(body.routine.exercises[0]).toMatchObject({ sets: expect.any(Array) });
+  });
+
+  it('preserves every existing exercise when updating without passing exercises', async () => {
+    const client = fakeHevy({ byId: { '/v1/routines/r1': FETCHED_ROUTINE } });
+    await hevyWriteRoutine(client, { routineId: 'r1', title: 'Upper A v2' });
+
+    const write = client.calls.find(call => call.method === 'PUT');
+    expect(write?.endpoint).toBe('/v1/routines/r1');
+    const routine = (write?.body as { routine: Record<string, unknown> }).routine;
+    expect(routine.title).toBe('Upper A v2');
+    expect(routine.notes).toBe('keep form');
+    expect(routine.exercises).toHaveLength(2);
+    // folder_id is create-only; sending it on PUT is a 400.
+    expect('folder_id' in routine).toBe(false);
+  });
+
+  it('carries supersets and rest across the read-modify-write round trip', async () => {
+    const client = fakeHevy({ byId: { '/v1/routines/r1': FETCHED_ROUTINE } });
+    await hevyWriteRoutine(client, { routineId: 'r1', notes: 'updated' });
+
+    const body = client.calls.find(call => call.method === 'PUT')?.body as {
+      routine: { exercises: Record<string, unknown>[] };
+    };
+    expect(body.routine.exercises[0]).toMatchObject({ superset_id: 1, rest_seconds: 90 });
+    expect(body.routine.exercises[0]).not.toHaveProperty('supersets_id');
+    expect(body.routine.exercises[0]).not.toHaveProperty('index');
+  });
+
+  it('appends to the existing exercises when exercise_mode is append', async () => {
+    const client = fakeHevy({ byId: { '/v1/routines/r1': FETCHED_ROUTINE }, templates: TEMPLATES });
+    await hevyWriteRoutine(client, {
+      routineId: 'r1',
+      exercises: [{ exercise_template_id: '79D0BB3A', sets: 2, reps: 10 }],
+      exerciseMode: 'append',
+    });
+    const body = client.calls.find(call => call.method === 'PUT')?.body as {
+      routine: { exercises: unknown[] };
+    };
+    expect(body.routine.exercises).toHaveLength(3);
+  });
+
+  it('replaces the exercises by default', async () => {
+    const client = fakeHevy({ byId: { '/v1/routines/r1': FETCHED_ROUTINE } });
+    await hevyWriteRoutine(client, {
+      routineId: 'r1',
+      exercises: [{ exercise_template_id: '79D0BB3A', sets: 2, reps: 10 }],
+    });
+    const body = client.calls.find(call => call.method === 'PUT')?.body as {
+      routine: { exercises: unknown[] };
+    };
+    expect(body.routine.exercises).toHaveLength(1);
+  });
+
+  it('returns the request body and sends nothing when dry_run is set', async () => {
+    const client = fakeHevy({ byId: { '/v1/routines/r1': FETCHED_ROUTINE } });
+    const result = (await hevyWriteRoutine(client, {
+      routineId: 'r1',
+      title: 'Preview',
+      dryRun: true,
+    })) as { dry_run: boolean; method: string; endpoint: string };
+
+    expect(result).toMatchObject({ dry_run: true, method: 'PUT', endpoint: '/v1/routines/r1' });
+    expect(client.calls.some(call => call.method === 'PUT')).toBe(false);
+  });
+
+  it('refuses to move a routine between folders', async () => {
+    const client = fakeHevy({ byId: { '/v1/routines/r1': FETCHED_ROUTINE } });
+    await expect(
+      hevyWriteRoutine(client, { routineId: 'r1', folderName: 'Push Pull' }),
+    ).rejects.toThrow(/cannot be moved between folders/);
+  });
+
+  it('resolves a folder by name on create', async () => {
+    const client = fakeHevy({
+      templates: TEMPLATES,
+      folderPages: [[{ id: 7, title: 'Push Pull' }]],
+    });
+    await hevyWriteRoutine(client, {
+      title: 'Push A',
+      exercises: [{ exercise_template_id: '79D0BB3A', reps: 5 }],
+      folderName: 'push pull',
+    });
+    const body = client.calls.find(call => call.method === 'POST')?.body as {
+      routine: { folder_id: number };
+    };
+    expect(body.routine.folder_id).toBe(7);
+  });
+
+  it('creates a missing folder only when create_folder is set', async () => {
+    const strict = fakeHevy({ folderPages: [[]] });
+    await expect(
+      hevyWriteRoutine(strict, {
+        title: 'Push A',
+        exercises: [{ exercise_template_id: '79D0BB3A', reps: 5 }],
+        folderName: 'New Folder',
+      }),
+    ).rejects.toThrow(/pass create_folder=true/);
+
+    const lenient = fakeHevy({ folderPages: [[]], writeResult: { routine_folder: { id: 9 } } });
+    await hevyWriteRoutine(lenient, {
+      title: 'Push A',
+      exercises: [{ exercise_template_id: '79D0BB3A', reps: 5 }],
+      folderName: 'New Folder',
+      createFolder: true,
+    });
+    const folderCall = lenient.calls.find(
+      call => call.method === 'POST' && call.endpoint === '/v1/routine_folders',
+    );
+    expect(folderCall?.body).toEqual({ routine_folder: { title: 'New Folder' } });
+    const routineBody = lenient.calls.find(
+      call => call.method === 'POST' && call.endpoint === '/v1/routines',
+    )?.body as { routine: { folder_id: number } };
+    expect(routineBody.routine.folder_id).toBe(9);
+  });
+
+  it('refuses an ambiguous exercise name instead of guessing, and sends nothing', async () => {
+    const client = fakeHevy({ templates: TEMPLATES });
+    await expect(
+      hevyWriteRoutine(client, { title: 'X', exercises: [{ exercise: 'bench press', reps: 5 }] }),
+    ).rejects.toThrow(/is ambiguous/);
+    expect(client.calls.some(call => call.method !== 'GET')).toBe(false);
+  });
+
+  it('rejects a routine set carrying rpe before any request is made', async () => {
+    const client = fakeHevy({});
+    await expect(
+      hevyWriteRoutine(client, {
+        title: 'X',
+        exercises: [{ exercise_template_id: '79D0BB3A', reps: 5, rpe: 8 }],
+      }),
+    ).rejects.toThrow(/rpe is not supported on routine sets/);
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it('requires a title and exercises when creating', async () => {
+    const client = fakeHevy({});
+    await expect(hevyWriteRoutine(client, { title: 'X' })).rejects.toThrow(/requires exercises/);
+    await expect(
+      hevyWriteRoutine(client, { exercises: [{ exercise_template_id: 'X1', reps: 5 }] }),
+    ).rejects.toThrow(/requires a title/);
+  });
+});
+
+const FETCHED_WORKOUT = {
+  id: 'w1',
+  title: 'Push',
+  start_time: '2026-08-01T18:00:00Z',
+  end_time: '2026-08-01T19:00:00Z',
+  description: 'solid',
+  exercises: [
+    {
+      index: 0,
+      title: 'Bench Press (Barbell)',
+      exercise_template_id: '79D0BB3A',
+      supersets_id: null,
+      sets: [{ index: 0, type: 'normal', weight_kg: 60, reps: 8, rpe: 8.5 }],
+    },
+  ],
+};
+
+describe('hevyWriteWorkout', () => {
+  it('POSTs a new workout when no id is given', async () => {
+    const client = fakeHevy({ templates: TEMPLATES });
+    await hevyWriteWorkout(client, {
+      title: 'Push',
+      startTime: '2026-08-06T18:00:00Z',
+      endTime: '2026-08-06T19:00:00Z',
+      exercises: [{ exercise: 'Bench Press (Barbell)', sets: 2, reps: 8, weight_kg: 60, rpe: 8 }],
+    });
+    const write = client.calls.find(call => call.method === 'POST');
+    expect(write?.endpoint).toBe('/v1/workouts');
+    const body = write?.body as { workout: { exercises: { sets: { rpe?: number }[] }[] } };
+    expect(body.workout.exercises[0].sets).toHaveLength(2);
+    expect(body.workout.exercises[0].sets[0].rpe).toBe(8);
+  });
+
+  it('preserves title, times, exercises and rpe when updating only the description', async () => {
+    const client = fakeHevy({ byId: { '/v1/workouts/w1': FETCHED_WORKOUT } });
+    await hevyWriteWorkout(client, { workoutId: 'w1', description: 'edited' });
+
+    const body = client.calls.find(call => call.method === 'PUT')?.body as {
+      workout: {
+        title: string;
+        start_time: string;
+        description: string;
+        exercises: { sets: { rpe?: number }[] }[];
+      };
+    };
+    expect(body.workout).toMatchObject({
+      title: 'Push',
+      start_time: '2026-08-01T18:00:00Z',
+      description: 'edited',
+    });
+    expect(body.workout.exercises[0].sets[0].rpe).toBe(8.5);
+  });
+
+  it('requires exercises when creating', async () => {
+    const client = fakeHevy({});
+    await expect(
+      hevyWriteWorkout(client, { title: 'Push', startTime: 'a', endTime: 'b' }),
+    ).rejects.toThrow(/requires exercises/);
+  });
+
+  it('rejects rest_seconds on a logged workout before any request is made', async () => {
+    const client = fakeHevy({});
+    await expect(
+      hevyWriteWorkout(client, {
+        title: 'Push',
+        startTime: '2026-08-06T18:00:00Z',
+        endTime: '2026-08-06T19:00:00Z',
+        exercises: [{ exercise_template_id: '79D0BB3A', reps: 5, rest_seconds: 60 }],
+      }),
+    ).rejects.toThrow(/rest_seconds is a routine planning field/);
+    expect(client.calls).toHaveLength(0);
   });
 });
 

@@ -7,7 +7,7 @@ from the Python/FastMCP server in
 alongside `/personal-context`.
 
 ```
-client ──POST /personal-tools (Bearer token)──► ynab_* (8) / hevy_* (2) / gcal_* (7)
+client ──POST /personal-tools (Bearer token)──► ynab_* (8) / hevy_* (8) / gcal_* (7)
                                                      │           │            │
                                           api.ynab.com/v1  api.hevyapp.com  googleapis.com/calendar/v3
                                           (YNAB_TOKEN)     (HEVY_API_KEY)   (OAuth refresh token)
@@ -22,7 +22,7 @@ no Python-specific SDKs:
 | Integration | Auth | Portable to JS? | Status |
 |---|---|---|---|
 | YNAB | Static bearer token (`YNAB_TOKEN`) | ✅ trivially — plain REST | **Ported** (8 tools) |
-| Hevy | Static API key (`api-key` header, `HEVY_API_KEY`) | ✅ trivially — plain REST | **Ported** (2 tools) |
+| Hevy | Static API key (`api-key` header, `HEVY_API_KEY`) | ✅ trivially — plain REST | **Ported** (8 tools: 2 aggregations, 3 reads, 3 writes) |
 | Google Calendar | Google OAuth refresh token + client id/secret | ✅ ported — plain REST + one refresh-token exchange | **Ported** (7 tools) |
 | Google Sheets | Same Google OAuth token flow | ✅ possible, needs token plumbing | **Skipped** (see below) |
 | Auth0 OAuth server (DCR, callback, scopes) | — | n/a | **Skipped by design** — this host uses its static bearer + Tailscale model instead |
@@ -79,14 +79,80 @@ this host is tools-only for now.
 
 ### Hevy (`hevy_*`)
 
+Hevy models two different things and so do these tools: a **workout** is a
+session that happened, a **routine** is a reusable plan.
+
 | Tool | Parameters | Purpose |
 |---|---|---|
 | `hevy_recent_activity` | `days?` (default 14) | Total workouts / working sets / volume (kg) + per-session breakdown. Warmup sets excluded. |
 | `hevy_activity_by_muscle` | `days?` (default 14) | Sets + volume per muscle group (primary/secondary via Hevy exercise templates), sorted by volume. |
+| `hevy_search_exercises` | `query`, `limit?` (20) | Exercise templates by name → `exercise_template_id`. The entry point for every write. |
+| `hevy_get_workout` | `workout_id` | One logged workout with all exercises and sets. |
+| `hevy_routines` | `routine_id?` | All routines, or one. |
+| `hevy_write_workout` | `workout_id?`, `title?`, `start_time?`, `end_time?`, `exercises?`, `description?`, `is_private?`, `exercise_mode?`, `dry_run?` | Log a session; updates when `workout_id` is passed. |
+| `hevy_write_routine` | `routine_id?`, `title?`, `exercises?`, `notes?`, `folder_name?`, `create_folder?`, `exercise_mode?`, `dry_run?` | Create a plan; updates when `routine_id` is passed. |
+| `hevy_create_custom_exercise` | `title`, `exercise_type`, `equipment_category`, `muscle_group`, `other_muscles?`, `dry_run?` | Custom template when no stock exercise fits. |
 
-Both paginate `/v1/workouts` newest-first (pages of 10) and stop at the first
-workout older than the window; the muscle tool additionally loads all exercise
-templates (pages of 100) to map `exercise_template_id` → muscle groups.
+The two aggregation tools paginate `/v1/workouts` newest-first (pages of 10) and
+stop at the first workout older than the window; the muscle tool additionally
+loads all exercise templates (pages of 100) to map `exercise_template_id` →
+muscle groups.
+
+Create and update are one tool per entity rather than two, consistent with how
+the YNAB surface was consolidated: the presence of an id decides the verb.
+
+#### Writing
+
+Every write follows the same three steps:
+
+1. **Resolve** — exercises are addressed by `exercise_template_id`. Either call
+   `hevy_search_exercises`, or pass `exercise: "<name>"` and let it resolve. An
+   ambiguous name is refused with the candidates listed rather than guessed at.
+2. **Build** — `hevy-payloads.ts` constructs and validates the body. It is pure,
+   so a bad payload throws before any request is made.
+3. **Submit** — POST to create, PUT to update. `dry_run: true` stops after step 2
+   and returns the body that would have been sent.
+
+Exercises are a list of objects, accepted in either form:
+
+```jsonc
+// explicit sets
+{"exercise": "Bench Press (Barbell)", "sets": [
+  {"type": "warmup", "reps": 10, "weight_kg": 20},
+  {"reps": 8, "weight_kg": 60, "rpe": 8}
+]}
+
+// "3x8 @ 60kg" — a count plus the set fields to repeat
+{"exercise_template_id": "79D0BB3A", "sets": 3, "reps": 8, "weight_kg": 60}
+```
+
+Set fields: `type` (`normal` default, or `warmup`/`failure`/`dropset`),
+`weight_kg`, `reps`, `distance_meters`, `duration_seconds`, `custom_metric`;
+workout sets also take `rpe`, routine sets also take `rep_range`. Exercise
+fields: `notes`, `superset_id`, plus `rest_seconds` on routines. Sending a field
+to the wrong target is rejected locally rather than by a Hevy 400.
+
+#### Updates are merges, not patches
+
+Hevy has no PATCH — `PUT` replaces the whole object, so anything missing from
+the body is **deleted**. Both write tools therefore fetch the current object and
+merge the caller's fields over it:
+
+- Omit `exercises` and the existing ones are preserved.
+- Pass `exercises` with `exercise_mode: "replace"` (default) to swap them, or
+  `"append"` to add to the end.
+
+Two API constraints this surfaces rather than hides:
+
+- A routine **cannot be moved between folders** — `folder_id` is accepted only
+  on create, so `folder_name` on an update is refused instead of silently
+  ignored.
+- Reads return `supersets_id`, writes expect `superset_id`, and reads carry
+  server-assigned `index`/`title` that writes reject. The payload layer
+  translates, so supersets survive a read-edit-write round trip.
+
+There is no DELETE anywhere in the Hevy API; anything created has to be removed
+in the app.
 
 ### Google Calendar (`gcal_*`)
 
@@ -149,8 +215,12 @@ Follows the host's existing patterns exactly (see the connection/registry docs):
   access-token exchange and caches the access token in memory until near
   expiry (see `google-calendar.test.ts` for the caching/refresh behavior).
 - `src/mcps/personal-tools/tools.ts` — endpoint paths, response shaping,
-  pagination, report aggregation. Pure functions over an injected client ⇒
+  pagination, report aggregation, and the Hevy write orchestration (template
+  resolution, read-modify-write merge). Pure functions over an injected client ⇒
   unit-tested with fakes (`tools.test.ts`).
+- `src/mcps/personal-tools/hevy-payloads.ts` — Hevy request-body construction
+  and validation. No client, no I/O, so the payload rules are tested directly
+  (`hevy-payloads.test.ts`) and the same builders back both create and update.
 - `src/mcps/personal-tools/index.ts` — `McpDefinition` (`path:
   'personal-tools'`) building a fresh `McpServer` per request; added to
   `src/registry/registry.ts`, mounted automatically by `buildServer()` behind
@@ -167,12 +237,20 @@ claude mcp add --transport http personal-tools http://localhost:3000/personal-to
 
 - `npm test` — unit tests over the handlers (compact/verbose transactions,
   scope precedence, report math, Hevy pagination cutoff + warmup exclusion +
-  muscle mapping, Calendar event formatting/pagination/all-day inference,
-  `google-calendar.ts` token exchange + caching + refresh + error surfacing).
+  muscle mapping, Hevy payload validation + read/write shape round trip +
+  create/update dispatch + merge semantics, Calendar event
+  formatting/pagination/all-day inference, `google-calendar.ts` token exchange
+  + caching + refresh + error surfacing).
 - Live smoke (2026-07-19, real tokens): `tools/list` returned the 10 YNAB/Hevy
   tools; `ynab_report kind=net_worth` returned the real 4-account net worth;
   `hevy_activity_by_muscle days=365` aggregated 42 workouts with correct
   per-muscle ordering; unconfigured runs return clean `isError` results.
+- Hevy writes, live dry-run against the real account (2026-08-06): renaming a
+  7-exercise / 28-set routine preserved all 7 and 28 with `folder_id` correctly
+  absent and no read-shape keys leaking; `exercise_mode: "append"` produced 8;
+  an ambiguous exercise name was refused with candidates. **No live write has
+  been executed** — the create/update paths are verified only through `dry_run`
+  and unit tests, because Hevy has no DELETE to undo a test record with.
 - Calendar tools (`gcal_*`) are implemented and unit-tested but **not yet
   smoke-tested against a real Google account** — `GOOGLE_CALENDAR_REFRESH_TOKEN`
   needs to be minted (see Secrets above) before `tools/list`/live calls can be

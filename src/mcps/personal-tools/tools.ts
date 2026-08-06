@@ -1,6 +1,17 @@
 import type { GoogleCalendarClient } from '../../connections/google-calendar.js';
 import type { HevyClient } from '../../connections/hevy.js';
 import type { YnabClient } from '../../connections/ynab.js';
+import {
+  buildCustomExerciseBody,
+  buildExercises,
+  buildRoutineBody,
+  buildWorkoutBody,
+  HevyPayloadError,
+  routineToWriteShape,
+  workoutToWriteShape,
+  type BuiltExercise,
+  type TemplateResolver,
+} from './hevy-payloads.js';
 
 /**
  * Handler logic for the personal-tools MCP, ported from `my-mcp-platform` (Python/FastMCP)
@@ -555,6 +566,380 @@ export async function hevyActivityByMuscle(
     total_workouts: workouts.length,
     muscle_groups: muscleGroups,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Hevy — writes
+// ---------------------------------------------------------------------------
+//
+// The procedure is the same for every write: resolve exercise names to template ids, build the
+// body (`hevy-payloads.ts` validates and throws before anything is sent), then POST or PUT.
+// `dry_run` stops after the build and returns the body instead.
+//
+// Hevy has no PATCH, so `PUT` replaces the whole object. The update paths therefore read the
+// current object and merge the caller's changes over it — omitting `exercises` preserves them
+// rather than deleting them.
+
+/** Ranks loaded templates against a free-text query: exact, then prefix, then substring, then
+ *  all-words-present; ties break on title length, since the shortest title is usually the
+ *  plainest variant. Pure over an already-loaded cache, so it costs no extra API calls. */
+function rankTemplates(
+  templates: Map<string, HevyTemplate>,
+  query: string,
+  limit: number,
+): HevyTemplate[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) {
+    return [];
+  }
+  const words = needle.split(/\s+/);
+
+  const scored: { rank: number; length: number; template: HevyTemplate }[] = [];
+  for (const template of templates.values()) {
+    const title = (template.title ?? '').toLowerCase();
+    let rank: number;
+    if (title === needle) {
+      rank = 0;
+    } else if (title.startsWith(needle)) {
+      rank = 1;
+    } else if (title.includes(needle)) {
+      rank = 2;
+    } else if (words.every(word => title.includes(word))) {
+      rank = 3;
+    } else {
+      continue;
+    }
+    scored.push({ rank, length: title.length, template });
+  }
+
+  scored.sort((a, b) => a.rank - b.rank || a.length - b.length);
+  return scored.slice(0, limit).map(entry => entry.template);
+}
+
+export async function hevySearchExercises(
+  client: HevyClient,
+  args: { query: string; limit?: number },
+): Promise<unknown> {
+  const limit = args.limit ?? 20;
+  const templates = await loadTemplates(client);
+  const matches = rankTemplates(templates, args.query, limit);
+  return { query: args.query, match_count: matches.length, matches };
+}
+
+/**
+ * Builds a resolver over a loaded template cache. Refuses ambiguous names with the candidates
+ * listed rather than guessing, so a wrong exercise never gets silently written.
+ */
+function templateResolver(templates: Map<string, HevyTemplate>): TemplateResolver {
+  return (name: string): string => {
+    const matches = rankTemplates(templates, name, 10);
+    if (matches.length === 0) {
+      throw new HevyPayloadError(
+        `no exercise template matches ${JSON.stringify(name)}; search with ` +
+          'hevy_search_exercises, or create one with hevy_create_custom_exercise',
+      );
+    }
+    const needle = name.trim().toLowerCase();
+    const exact = matches.find(t => (t.title ?? '').trim().toLowerCase() === needle);
+    if (exact?.id) {
+      return exact.id;
+    }
+    if (matches.length === 1 && matches[0].id) {
+      return matches[0].id;
+    }
+    const listed = matches
+      .slice(0, 5)
+      .map(t => `${JSON.stringify(t.title ?? '')} (${t.id ?? '?'})`)
+      .join(', ');
+    throw new HevyPayloadError(
+      `exercise name ${JSON.stringify(name)} is ambiguous — ${matches.length} templates match: ` +
+        `${listed}. Pass an exact title or an exercise_template_id.`,
+    );
+  };
+}
+
+/** Only load the template cache when some exercise is identified by name. */
+async function resolverIfNeeded(
+  client: HevyClient,
+  exercises: unknown,
+): Promise<TemplateResolver | undefined> {
+  const needsNames =
+    Array.isArray(exercises) &&
+    exercises.some(spec => {
+      if (typeof spec !== 'object' || spec === null) {
+        return false;
+      }
+      const record = spec as Record<string, unknown>;
+      const hasId = Boolean(record.exercise_template_id ?? record.template_id ?? record.id);
+      return !hasId;
+    });
+  return needsNames ? templateResolver(await loadTemplates(client)) : undefined;
+}
+
+function dryRunResult(method: string, endpoint: string, payload: unknown): unknown {
+  return { dry_run: true, method, endpoint, payload };
+}
+
+type ExerciseMode = 'replace' | 'append';
+
+/** Merge current exercises with the caller's, per `mode`; `undefined` incoming keeps them all. */
+function mergeExercises(
+  existing: BuiltExercise[],
+  incoming: BuiltExercise[] | undefined,
+  mode: ExerciseMode,
+): BuiltExercise[] {
+  if (incoming === undefined) {
+    return existing;
+  }
+  return mode === 'append' ? [...existing, ...incoming] : incoming;
+}
+
+export async function hevyGetWorkout(
+  client: HevyClient,
+  args: { workoutId: string },
+): Promise<unknown> {
+  return client.get(`/v1/workouts/${args.workoutId}`);
+}
+
+interface HevyRoutine {
+  id?: string;
+  title?: string;
+  notes?: string | null;
+  folder_id?: number | null;
+  exercises?: unknown[];
+}
+
+interface HevyRoutinesPage {
+  routines?: HevyRoutine[];
+  page_count?: number;
+}
+
+/** All routines, or one when `routineId` is given. `GET /v1/routines/{id}` wraps its result. */
+export async function hevyRoutines(
+  client: HevyClient,
+  args: { routineId?: string },
+): Promise<unknown> {
+  if (args.routineId) {
+    const resp = (await client.get(`/v1/routines/${args.routineId}`)) as {
+      routine?: HevyRoutine;
+    };
+    return resp.routine ?? resp;
+  }
+  const routines: HevyRoutine[] = [];
+  for (let page = 1; ; page++) {
+    const resp = (await client.get('/v1/routines', {
+      page: String(page),
+      pageSize: '10',
+    })) as HevyRoutinesPage;
+    routines.push(...(resp.routines ?? []));
+    if (page >= (resp.page_count ?? page)) {
+      break;
+    }
+  }
+  return { routine_count: routines.length, routines };
+}
+
+interface HevyFolder {
+  id?: number;
+  title?: string;
+}
+
+interface HevyFoldersPage {
+  routine_folders?: HevyFolder[];
+  page_count?: number;
+}
+
+async function listFolders(client: HevyClient): Promise<HevyFolder[]> {
+  const folders: HevyFolder[] = [];
+  for (let page = 1; ; page++) {
+    const resp = (await client.get('/v1/routine_folders', {
+      page: String(page),
+      pageSize: '10',
+    })) as HevyFoldersPage;
+    folders.push(...(resp.routine_folders ?? []));
+    if (page >= (resp.page_count ?? page)) {
+      break;
+    }
+  }
+  return folders;
+}
+
+/** Resolve a folder name to its id, optionally creating the folder. */
+async function resolveFolderId(
+  client: HevyClient,
+  name: string,
+  create: boolean,
+): Promise<number> {
+  const needle = name.trim().toLowerCase();
+  const existing = (await listFolders(client)).find(
+    folder => (folder.title ?? '').trim().toLowerCase() === needle,
+  );
+  if (existing?.id !== undefined) {
+    return existing.id;
+  }
+  if (!create) {
+    throw new HevyPayloadError(
+      `no routine folder named ${JSON.stringify(name)}; pass create_folder=true to create it`,
+    );
+  }
+  const created = (await client.post('/v1/routine_folders', {
+    routine_folder: { title: name },
+  })) as { routine_folder?: HevyFolder; id?: number };
+  const id = created.routine_folder?.id ?? created.id;
+  if (id === undefined) {
+    throw new HevyPayloadError(
+      `created routine folder ${JSON.stringify(name)} but the API returned no id`,
+    );
+  }
+  return id;
+}
+
+/**
+ * Create a routine, or update one when `routineId` is given.
+ *
+ * On update, fields left undefined keep their current value, and `folder_id` is unavailable —
+ * the API only accepts it on create, so routines cannot be moved between folders.
+ */
+export async function hevyWriteRoutine(
+  client: HevyClient,
+  args: {
+    routineId?: string;
+    title?: string;
+    exercises?: unknown;
+    notes?: string;
+    folderName?: string;
+    createFolder?: boolean;
+    exerciseMode?: ExerciseMode;
+    dryRun?: boolean;
+  },
+): Promise<unknown> {
+  const resolve = await resolverIfNeeded(client, args.exercises);
+  const built =
+    args.exercises === undefined ? undefined : buildExercises(args.exercises, true, resolve);
+
+  if (!args.routineId) {
+    if (!args.title) {
+      throw new HevyPayloadError('creating a routine requires a title');
+    }
+    if (built === undefined) {
+      throw new HevyPayloadError('creating a routine requires exercises');
+    }
+    const folderId = args.folderName
+      ? await resolveFolderId(client, args.folderName, args.createFolder ?? false)
+      : null;
+    const body = buildRoutineBody({
+      title: args.title,
+      exercises: built,
+      notes: args.notes,
+      folderId,
+    });
+    return args.dryRun
+      ? dryRunResult('POST', '/v1/routines', body)
+      : client.post('/v1/routines', body);
+  }
+
+  if (args.folderName) {
+    throw new HevyPayloadError(
+      'a routine cannot be moved between folders; the Hevy API only accepts a folder when the ' +
+        'routine is created',
+    );
+  }
+
+  const resp = (await client.get(`/v1/routines/${args.routineId}`)) as { routine?: HevyRoutine };
+  const current = resp.routine ?? (resp as HevyRoutine);
+  const body = buildRoutineBody({
+    title: args.title ?? current.title ?? '',
+    exercises: mergeExercises(
+      routineToWriteShape(current as { exercises?: [] }),
+      built,
+      args.exerciseMode ?? 'replace',
+    ),
+    notes: args.notes ?? current.notes ?? undefined,
+    includeFolderId: false,
+  });
+  const endpoint = `/v1/routines/${args.routineId}`;
+  return args.dryRun ? dryRunResult('PUT', endpoint, body) : client.put(endpoint, body);
+}
+
+/**
+ * Log a workout, or update one when `workoutId` is given. On update, fields left undefined keep
+ * their current value.
+ */
+export async function hevyWriteWorkout(
+  client: HevyClient,
+  args: {
+    workoutId?: string;
+    title?: string;
+    startTime?: string;
+    endTime?: string;
+    exercises?: unknown;
+    description?: string;
+    isPrivate?: boolean;
+    exerciseMode?: ExerciseMode;
+    dryRun?: boolean;
+  },
+): Promise<unknown> {
+  const resolve = await resolverIfNeeded(client, args.exercises);
+  const built =
+    args.exercises === undefined ? undefined : buildExercises(args.exercises, false, resolve);
+
+  if (!args.workoutId) {
+    if (built === undefined) {
+      throw new HevyPayloadError('logging a workout requires exercises');
+    }
+    const body = buildWorkoutBody({
+      title: args.title ?? '',
+      startTime: args.startTime ?? '',
+      endTime: args.endTime ?? '',
+      exercises: built,
+      description: args.description,
+      isPrivate: args.isPrivate,
+    });
+    return args.dryRun
+      ? dryRunResult('POST', '/v1/workouts', body)
+      : client.post('/v1/workouts', body);
+  }
+
+  const current = (await client.get(`/v1/workouts/${args.workoutId}`)) as HevyWorkout & {
+    description?: string | null;
+  };
+  const body = buildWorkoutBody({
+    title: args.title ?? current.title ?? '',
+    startTime: args.startTime ?? current.start_time ?? '',
+    endTime: args.endTime ?? current.end_time ?? '',
+    exercises: mergeExercises(
+      workoutToWriteShape(current as { exercises?: [] }),
+      built,
+      args.exerciseMode ?? 'replace',
+    ),
+    description: args.description ?? current.description ?? undefined,
+    isPrivate: args.isPrivate,
+  });
+  const endpoint = `/v1/workouts/${args.workoutId}`;
+  return args.dryRun ? dryRunResult('PUT', endpoint, body) : client.put(endpoint, body);
+}
+
+export async function hevyCreateCustomExercise(
+  client: HevyClient,
+  args: {
+    title: string;
+    exerciseType: string;
+    equipmentCategory: string;
+    muscleGroup: string;
+    otherMuscles?: string[];
+    dryRun?: boolean;
+  },
+): Promise<unknown> {
+  const body = buildCustomExerciseBody({
+    title: args.title,
+    exerciseType: args.exerciseType,
+    equipmentCategory: args.equipmentCategory,
+    muscleGroup: args.muscleGroup,
+    otherMuscles: args.otherMuscles,
+  });
+  return args.dryRun
+    ? dryRunResult('POST', '/v1/exercise_templates', body)
+    : client.post('/v1/exercise_templates', body);
 }
 
 // ---------------------------------------------------------------------------

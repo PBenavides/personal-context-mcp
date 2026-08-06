@@ -35,10 +35,13 @@ connection layer) is documented in [docs/](docs/).
 
 The action layer, ported from the Python `my-mcp-platform` server: 8 `ynab_*`
 tools (budgets, accounts, unified transaction queries, categories, payees,
-scheduled, one write, aggregated reports) and 2 `hevy_*` workout-analytics
-tools. Requires `YNAB_TOKEN` / `HEVY_API_KEY`; unset keys disable the
-corresponding tools cleanly. Full surface, design rationale, and the
-Google-integrations status: [docs/personal-tools.md](docs/personal-tools.md).
+scheduled, one write, aggregated reports) and 8 `hevy_*` tools (workout
+analytics, exercise search, plus creating and updating workouts and routines —
+`hevy_write_*` create when given no id and update when given one, and take
+`dry_run` to preview the request body). Requires `YNAB_TOKEN` / `HEVY_API_KEY`;
+unset keys disable the corresponding tools cleanly. Full surface, design
+rationale, and the Google-integrations status:
+[docs/personal-tools.md](docs/personal-tools.md).
 
 ## Run it
 
