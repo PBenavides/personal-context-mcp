@@ -87,6 +87,8 @@ session that happened, a **routine** is a reusable plan.
 | `hevy_recent_activity` | `days?` (default 4), `type?`, `depth?`, `specific?` | Recent training grouped by muscle group → day, plus each session's `workout_id` and duration. Warmup sets excluded. |
 | `hevy_search_exercise_catalog` | `query?`, `muscle_group?`, `limit?` (20) | The exercise catalog by name and/or muscle group → `exercise_template_id`. The entry point for every write. |
 | `hevy_get_workout` | `workout_id` | One logged workout with all exercises and sets. |
+| `hevy_body_measurements` | `date?`, `days?`, `limit?` (10) | Logged measurements, newest first. Nulls omitted. |
+| `hevy_calculate_burnt_calories` | `workout_id`, `weight_kg?`, `fat_percent?`, `lean_mass_kg?` | Estimated energy cost of one workout. Rough — see below. |
 | `hevy_routines` | `routine_id?` | All routines, or one. |
 | `hevy_write_workout` | `workout_id?`, `title?`, `start_time?`, `end_time?`, `exercises?`, `description?`, `is_private?`, `exercise_mode?`, `dry_run?` | Log a session; updates when `workout_id` is passed. |
 | `hevy_write_routine` | `routine_id?`, `title?`, `exercises?`, `notes?`, `folder_name?`, `create_folder?`, `exercise_mode?`, `dry_run?` | Create a plan; updates when `routine_id` is passed. |
@@ -94,6 +96,54 @@ session that happened, a **routine** is a reusable plan.
 
 Create and update are one tool per entity rather than two, consistent with how
 the YNAB surface was consolidated: the presence of an id decides the verb.
+
+#### Estimating calories (`hevy_calculate_burnt_calories`)
+
+The model lives in `hevy-energy.ts` — pure, no I/O, unit-tested directly. It sums
+`resting_kcal_per_minute × MET × minutes` over time segments, with three
+departures from the textbook MET formula:
+
+1. **Resting rate is measured, not assumed.** The MET convention fixes 1 MET at
+   3.5 mL O₂/kg/min of *total* mass, which overestimates for anyone carrying fat.
+   Katch-McArdle (`370 + 21.6 × lean_mass_kg`) uses lean mass instead. At 80 kg
+   and 18 % fat that is 1.24 vs 1.40 kcal/min — a ~13 % difference on every
+   session. Mifflin-St Jeor is deliberately absent: it needs age/sex/height, none
+   of which the Hevy API exposes.
+2. **Rest is not lifting.** Session duration is mostly rest, so time is split
+   into active (`duration_seconds`, else `reps × 3s`) and recovery (1.8 MET).
+   Charging the whole session at a lifting MET is the biggest error in naive
+   estimates.
+3. **Muscle size scales the cost.** Each exercise's MET is multiplied by the
+   muscle it recruits — `MUSCLE_MASS_WEIGHTS[primary] + 0.5 × Σ secondary`,
+   normalized so a compound push is 1.0 and clamped to [0.6, 1.6]. Squats outrank
+   presses outrank curls.
+
+Cardio takes a different path: pace comes from `distance_meters` /
+`duration_seconds`, and the ACSM walking/running equations turn it into a MET.
+
+Everything is swappable via the `EnergyModel` interface — replace `metForSet` or
+`muscleFactor` without touching the time accounting (see the last test in
+`hevy-energy.test.ts`).
+
+Degradation ladder for the resting rate, reported as `basis.resting_basis`:
+
+| Available | Basis |
+|---|---|
+| `lean_mass_kg` | `katch_mcardle_measured_lean_mass` |
+| `weight_kg` + `fat_percent` | `katch_mcardle_derived_lean_mass` |
+| `weight_kg` only | `met_convention_total_weight` — warns |
+| nothing | throws rather than inventing a body mass |
+
+**Accuracy.** ±20-30 % at best against indirect calorimetry, and resistance
+training is the weakest case. `accuracy_note` is attached to every result and
+`warnings[]` carries anything odd — missing body composition, a measurement much
+older than the workout, sets with neither reps nor duration, an unknown template,
+a duration that contradicts the set data, or an implausible kcal/min that means
+the inputs are wrong. Both are meant to be surfaced with the number, not stripped.
+
+One deliberate inconsistency: **warmup sets are counted here**, unlike every
+other Hevy aggregation in this file. The body does not honour our accounting
+convention.
 
 #### Reading recent training
 
