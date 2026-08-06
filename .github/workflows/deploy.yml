@@ -1,0 +1,166 @@
+# CD. Fires when a PR lands on main: build the production image, push it to ECR
+# under the commit SHA, then roll the droplet's mcp container to that tag.
+#
+# Scope: this workflow deploys ONLY the personal-context-mcp container. The
+# droplet is shared with slskd, and scripts/roll_image.sh is written to be
+# incapable of reaching it (see the header comment there). Provisioning changes
+# — .env contents, the pipeline image, systemd timers — are not automated; run
+# personal-infra/context/deploy/deploy.sh by hand for those.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    # Documentation-only merges don't need a deploy.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  # Manual redeploy / rollback: pick any tag already in ECR ("sha-abc1234").
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'ECR image tag to deploy (blank = build from the current main)'
+        required: false
+        default: ''
+
+# One deploy at a time. Never cancel a running deploy — a half-rolled container
+# is worse than a queued one.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: build + push to ECR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Skipped when redeploying a tag that already exists in ECR.
+    if: github.event_name == 'push' || inputs.image_tag == ''
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Compute image tag
+        id: meta
+        run: echo "image_tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # linux/amd64 explicitly: the droplet is x86_64 and the runner's native
+      # platform is not guaranteed to stay that way.
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/personal-context-mcp:${{ steps.meta.outputs.image_tag }}
+            ${{ steps.ecr.outputs.registry }}/personal-context-mcp:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: roll the droplet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [release]
+    # Runs after a build, or straight away when redeploying an existing tag.
+    if: always() && (needs.release.result == 'success' || needs.release.result == 'skipped')
+    # NB: no `environment:` gate here. Deployment environments (and their manual
+    # approval rules) require Pro on a private repo — same plan limit that blocks
+    # branch protection. Add `environment: production` if the repo ever goes
+    # public or moves to Pro; it's the natural place for an approval step.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Resolve the tag to deploy
+        id: tag
+        env:
+          BUILT_TAG: ${{ needs.release.outputs.image_tag }}
+          REQUESTED_TAG: ${{ inputs.image_tag }}
+        run: |
+          tag="${REQUESTED_TAG:-$BUILT_TAG}"
+          # Constrain to what we actually mint, so nothing arbitrary reaches the shell.
+          if ! printf '%s' "$tag" | grep -Eq '^(latest|sha-[0-9a-f]{7,40})$'; then
+            echo "refusing to deploy unrecognised tag: $tag" >&2
+            exit 1
+          fi
+          echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      # The droplet has no public SSH: it is reachable only over the tailnet.
+      # The runner joins as an ephemeral tag:ci node that disappears when the
+      # job ends, so there is no long-lived device to prune.
+      - name: Join the tailnet
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      # StrictHostKeyChecking=accept-new is trust-on-first-use, which is a
+      # deliberate choice rather than an oversight. The runner reaches the
+      # droplet only over WireGuard, to a tailnet address whose peer Tailscale
+      # has already authenticated cryptographically — so the SSH host key adds
+      # little on top, and an attacker able to forge that peer owns the node
+      # anyway. Against that: the droplet is documented as disposable, and
+      # pinning a host key means every rebuild breaks deploys until the pin is
+      # updated. To pin anyway, put the output of
+      #   ssh-keyscan -t ed25519 100.118.218.44
+      # in a DROPLET_KNOWN_HOSTS variable, write it to ~/.ssh/known_hosts here,
+      # and switch this to StrictHostKeyChecking=yes.
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
+          DROPLET_HOST: ${{ vars.DROPLET_HOST }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          cat >> ~/.ssh/config <<'EOF'
+          Host droplet
+            User root
+            IdentityFile ~/.ssh/id_ed25519
+            StrictHostKeyChecking accept-new
+            ConnectTimeout 20
+          EOF
+          printf '  HostName %s\n' "$DROPLET_HOST" >> ~/.ssh/config
+
+      - name: Roll the mcp container
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+          DROPLET: droplet
+          AWS_REGION: us-east-1
+        run: ./scripts/roll_image.sh
+
+      # Belt and braces: prove the deployed server speaks MCP, not just that
+      # /ready answered. Runs over the tailnet against the live endpoint.
+      - name: Smoke the deployed server
+        env:
+          MCP_URL: http://${{ vars.DROPLET_HOST }}:8090/personal-context
+          MCP_BEARER_TOKEN: ${{ secrets.MCP_SMOKE_BEARER_TOKEN }}
+          EXPECT_DOC: ${{ vars.SMOKE_EXPECT_DOC }}
+          QUERY: ${{ vars.SMOKE_QUERY }}
+        run: ./scripts/mcp_smoke.sh
