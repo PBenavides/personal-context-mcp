@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Refuse direct pushes to main.
+#
+# This repo is private on a Free plan, where GitHub's branch-protection and
+# ruleset APIs both answer 403 ("Upgrade to GitHub Pro or make this repository
+# public"). So the "everything goes through a PR" rule has no server-side
+# enforcement and lives here instead.
+#
+# That means it is advisory: `git push --no-verify` bypasses it, and so does a
+# fresh clone that hasn't run `make hooks`. It is a guardrail against habit, not
+# a security control. For real enforcement, make the repo public or move to Pro
+# — see docs/CICD.md.
+#
+# Installed by `make hooks` (sets core.hooksPath to .githooks).
+set -euo pipefail
+
+protected="refs/heads/main"
+
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+  # Deleting a branch sends the all-zeroes SHA; let that through.
+  if [[ "$local_sha" =~ ^0+$ ]]; then continue; fi
+
+  if [[ "$remote_ref" == "$protected" ]]; then
+    cat >&2 <<'EOF'
+
+  ✋ Direct push to main is disabled.
+
+  Open a pull request instead:
+
+      git switch -c feat/your-change
+      git push -u origin HEAD
+      gh pr create --fill
+
+  CI (typecheck, lint, tests, smoke, docker build) runs on the PR, and
+  merging it deploys to the droplet automatically.
+
+  If you genuinely need to bypass this: git push --no-verify
+
+EOF
+    exit 1
+  fi
+done
+
+exit 0

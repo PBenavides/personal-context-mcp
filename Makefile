@@ -1,8 +1,14 @@
-.PHONY: dependencies format lint test typecheck build smoke verify release
+.PHONY: dependencies format lint test typecheck build smoke verify release hooks deploy
 APPLICATION_NAME=personal-context-mcp
 
 dependencies:
 	@npm ci
+
+# Install the repo's git hooks (pre-push refuses direct pushes to main).
+# Run once per clone — see docs/CICD.md for why this isn't server-side.
+hooks:
+	@git config core.hooksPath .githooks
+	@echo "hooks installed: core.hooksPath -> .githooks"
 
 format:
 	@npm run format
@@ -36,6 +42,13 @@ release:
 	@docker build --platform linux/amd64 -t $(ECR_REPO):latest .
 	@docker push $(ECR_REPO):latest
 	@echo "released $(ECR_REPO):latest"
+
+# Manual escape hatch for the CD path: roll the droplet's mcp container to a tag
+# already in ECR, with the same health-check-and-rollback the workflow uses.
+# Normal deploys happen automatically when a PR merges.
+#   make deploy IMAGE_TAG=sha-abc1234
+deploy:
+	@IMAGE_TAG=$(IMAGE_TAG) AWS_PROFILE=$(AWS_PROFILE) bash scripts/roll_image.sh
 
 # Streamable-HTTP protocol smoke test against the fixture corpus (no credentials).
 smoke:
