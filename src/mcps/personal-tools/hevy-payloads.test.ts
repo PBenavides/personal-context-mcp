@@ -1,14 +1,11 @@
 import {
-  buildCustomExerciseBody,
   buildExercise,
   buildExercises,
   buildRepRange,
   buildRoutineBody,
   buildSet,
-  buildWorkoutBody,
   HevyPayloadError,
   routineToWriteShape,
-  workoutToWriteShape,
 } from './hevy-payloads.js';
 
 /** Stand-in resolver: only these two names are known, so ambiguity/misses are testable. */
@@ -175,34 +172,6 @@ describe('buildExercises', () => {
   });
 });
 
-describe('buildWorkoutBody', () => {
-  const exercises = [{ exercise_template_id: 'X1', reps: 5 }];
-
-  it('wraps the body under the workout key', () => {
-    const body = buildWorkoutBody({
-      title: 'Push',
-      startTime: '2026-08-06T18:00:00Z',
-      endTime: '2026-08-06T19:00:00Z',
-      exercises,
-    });
-    expect(Object.keys(body)).toEqual(['workout']);
-    expect(body.workout).toMatchObject({
-      title: 'Push',
-      start_time: '2026-08-06T18:00:00Z',
-      end_time: '2026-08-06T19:00:00Z',
-    });
-  });
-
-  it('requires a title and both timestamps', () => {
-    expect(() =>
-      buildWorkoutBody({ title: '', startTime: 'a', endTime: 'b', exercises }),
-    ).toThrow(/requires a title/);
-    expect(() =>
-      buildWorkoutBody({ title: 'Push', startTime: '', endTime: '', exercises }),
-    ).toThrow(/start_time and end_time/);
-  });
-});
-
 describe('buildRoutineBody', () => {
   const exercises = [{ exercise_template_id: 'X1', reps: 5 }];
 
@@ -221,43 +190,6 @@ describe('buildRoutineBody', () => {
     expect(() =>
       buildRoutineBody({ title: 'U', exercises, folderId: 1, includeFolderId: false }),
     ).toThrow(/cannot be changed when updating/);
-  });
-});
-
-describe('buildCustomExerciseBody', () => {
-  it('builds a valid body', () => {
-    expect(
-      buildCustomExerciseBody({
-        title: 'Cable Y-Raise',
-        exerciseType: 'weight_reps',
-        equipmentCategory: 'machine',
-        muscleGroup: 'shoulders',
-        otherMuscles: ['traps'],
-      }).exercise,
-    ).toEqual({
-      title: 'Cable Y-Raise',
-      exercise_type: 'weight_reps',
-      equipment_category: 'machine',
-      muscle_group: 'shoulders',
-      other_muscles: ['traps'],
-    });
-  });
-
-  it.each([
-    ['muscleGroup', { muscleGroup: 'delts' }, /muscle_group/],
-    ['equipmentCategory', { equipmentCategory: 'cable' }, /equipment_category/],
-    ['exerciseType', { exerciseType: 'weight_and_reps' }, /exercise_type/],
-    ['otherMuscles', { otherMuscles: ['delts'] }, /other_muscles/],
-  ])('rejects an invalid %s', (_label, override, pattern) => {
-    expect(() =>
-      buildCustomExerciseBody({
-        title: 'X',
-        exerciseType: 'weight_reps',
-        equipmentCategory: 'machine',
-        muscleGroup: 'shoulders',
-        ...override,
-      }),
-    ).toThrow(pattern);
   });
 });
 
@@ -308,17 +240,4 @@ describe('read shape to write shape', () => {
     expect(body.routine.exercises[0].sets).toHaveLength(2);
   });
 
-  it('preserves workout rpe and emits no rest_seconds', () => {
-    const [exercise] = workoutToWriteShape({
-      exercises: [
-        {
-          exercise_template_id: '79D0BB3A',
-          supersets_id: null,
-          sets: [{ type: 'normal', weight_kg: 60, reps: 8, rpe: 8.5 }],
-        },
-      ],
-    });
-    expect(exercise.sets[0].rpe).toBe(8.5);
-    expect(exercise).not.toHaveProperty('rest_seconds');
-  });
 });

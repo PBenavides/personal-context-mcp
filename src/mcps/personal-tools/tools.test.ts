@@ -9,12 +9,12 @@ import {
   gcalListCalendars,
   gcalListEvents,
   gcalUpdateEvent,
-  hevyActivityByMuscle,
+  hevyBodyMeasurements,
+  hevyGetWorkout,
   hevyRecentActivity,
   hevyRoutines,
-  hevySearchExercises,
+  hevySearchExerciseCatalog,
   hevyWriteRoutine,
-  hevyWriteWorkout,
   ynabCategories,
   ynabCreateTransaction,
   ynabReport,
@@ -289,77 +289,207 @@ function fakeHevy(opts: {
 
 const daysAgo = (days: number): string => new Date(Date.now() - days * 86_400_000).toISOString();
 
+/** Same UTC day key `hevyRecentActivity` groups on. */
+const dayOf = (isoDate: string): string => isoDate.slice(0, 10);
+
+const ACTIVITY_TEMPLATES = [
+  {
+    id: 'tmpl-bench',
+    title: 'Bench Press',
+    primary_muscle_group: 'chest',
+    secondary_muscle_groups: ['triceps', 'shoulders'],
+  },
+  { id: 'tmpl-curl', title: 'Bicep Curl', primary_muscle_group: 'biceps' },
+  { id: 'tmpl-run', title: 'Running', primary_muscle_group: 'cardio' },
+];
+
+/** A push session two days ago, a cardio session one day ago, plus an out-of-window page. */
+function activityClient(): ReturnType<typeof fakeHevy> {
+  return fakeHevy({
+    templates: ACTIVITY_TEMPLATES,
+    workoutPages: [
+      [
+        {
+          id: 'w-cardio',
+          title: 'Easy run',
+          start_time: daysAgo(1),
+          end_time: daysAgo(1),
+          exercises: [
+            {
+              title: 'Running',
+              exercise_template_id: 'tmpl-run',
+              sets: [{ type: 'normal', duration_seconds: 1800, distance_meters: 5000 }],
+            },
+          ],
+        },
+        {
+          id: 'w-push',
+          title: 'Push',
+          start_time: daysAgo(2),
+          end_time: new Date(Date.parse(daysAgo(2)) + 3_600_000).toISOString(),
+          exercises: [
+            {
+              title: 'Bench Press',
+              exercise_template_id: 'tmpl-bench',
+              sets: [
+                { type: 'warmup', weight_kg: 40, reps: 10 },
+                { type: 'normal', weight_kg: 80, reps: 5 },
+                { type: 'normal', weight_kg: 100, reps: 5 },
+              ],
+            },
+          ],
+        },
+      ],
+      // Second page is older than the window; pagination must stop before it.
+      [{ id: 'w-old', title: 'Ancient', start_time: daysAgo(400), exercises: [] }],
+    ],
+  });
+}
+
 describe('hevyRecentActivity', () => {
-  it('aggregates working sets and volume, excluding warmups and old workouts', async () => {
+  it('groups by muscle group then day, excluding warmups and out-of-window workouts', async () => {
+    const result = (await hevyRecentActivity(activityClient(), { days: 4 })) as Record<
+      string,
+      unknown
+    >;
+    expect(result).toMatchObject({
+      period_days: 4,
+      type: 'all',
+      depth: 0,
+      total_workouts: 2,
+      total_working_sets: 3,
+      total_volume_kg: 900,
+    });
+
+    const groups = result.muscle_groups as Record<string, Record<string, Record<string, unknown>>>;
+    // Ordered by volume: chest and its secondaries carry 900kg, cardio carries none.
+    expect(Object.keys(groups)).toEqual(['chest', 'triceps', 'shoulders', 'cardio']);
+    expect(groups.chest[dayOf(daysAgo(2))]).toEqual({
+      total_sets: 2,
+      total_volume_kg: 900,
+      as_primary: 2,
+      as_secondary: 0,
+      exercises_ids: { 'Bench Press': 'tmpl-bench' },
+    });
+    expect(groups.triceps[dayOf(daysAgo(2))]).toMatchObject({ as_primary: 0, as_secondary: 2 });
+    expect(Object.keys(groups.cardio)).toEqual([dayOf(daysAgo(1))]);
+  });
+
+  it('exposes the workout id and duration of every session in the window', async () => {
+    const result = (await hevyRecentActivity(activityClient(), {})) as Record<string, unknown>;
+    const sessions = result.sessions as Record<string, unknown>[];
+    expect(sessions.map(session => session.workout_id)).toEqual(['w-cardio', 'w-push']);
+    expect(sessions[1]).toMatchObject({
+      title: 'Push',
+      date: dayOf(daysAgo(2)),
+      duration_minutes: 60,
+      working_sets: 2,
+      volume_kg: 900,
+    });
+  });
+
+  it('defaults to a 4-day window', async () => {
     const client = fakeHevy({
       workoutPages: [
         [
-          {
-            title: 'Push',
-            start_time: daysAgo(2),
-            end_time: daysAgo(2),
-            exercises: [
-              {
-                title: 'Bench Press',
-                sets: [
-                  { type: 'warmup', weight_kg: 40, reps: 10 },
-                  { type: 'normal', weight_kg: 80, reps: 5 },
-                  { type: 'normal', weight_kg: 80, reps: 5 },
-                ],
-              },
-            ],
-          },
+          { id: 'recent', title: 'In', start_time: daysAgo(3), exercises: [] },
+          { id: 'stale', title: 'Out', start_time: daysAgo(5), exercises: [] },
         ],
-        // Second page is older than the window; pagination must stop there.
-        [{ title: 'Ancient', start_time: daysAgo(400), exercises: [] }],
       ],
     });
-    const result = (await hevyRecentActivity(client, { days: 14 })) as Record<string, unknown>;
-    expect(result.total_workouts).toBe(1);
-    expect(result.total_working_sets).toBe(2);
-    expect(result.total_volume_kg).toBe(800);
-    const sessions = result.sessions as { exercises: string[] }[];
-    expect(sessions[0].exercises).toEqual(['Bench Press']);
+    const result = (await hevyRecentActivity(client, {})) as Record<string, unknown>;
+    expect(result).toMatchObject({ period_days: 4, total_workouts: 1 });
   });
-});
 
-describe('hevyActivityByMuscle', () => {
-  it('maps exercises to primary and secondary muscle groups via templates', async () => {
+  it('describes each exercise in words at depth 1', async () => {
+    const result = (await hevyRecentActivity(activityClient(), {
+      type: 'muscles',
+      depth: 1,
+    })) as Record<string, unknown>;
+    const groups = result.muscle_groups as Record<string, Record<string, Record<string, unknown>>>;
+    expect(groups.chest[dayOf(daysAgo(2))].exercises_text).toEqual({
+      'Bench Press': '2 sets of 5 repetitions each with min of 80kg, max of 100kg.',
+    });
+    expect(groups.chest[dayOf(daysAgo(2))]).not.toHaveProperty('exercises_ids');
+  });
+
+  it('describes cardio sets by duration and distance', async () => {
+    const result = (await hevyRecentActivity(activityClient(), {
+      type: 'cardio',
+      depth: 1,
+    })) as Record<string, unknown>;
+    const groups = result.muscle_groups as Record<string, Record<string, Record<string, unknown>>>;
+    expect(Object.keys(groups)).toEqual(['cardio']);
+    expect(groups.cardio[dayOf(daysAgo(1))].exercises_text).toEqual({
+      Running: '1 set totalling 30 min over 5 km.',
+    });
+  });
+
+  it('excludes cardio from type "muscles" and everything else from type "cardio"', async () => {
+    const muscles = (await hevyRecentActivity(activityClient(), { type: 'muscles' })) as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(muscles.muscle_groups as object)).not.toContain('cardio');
+
+    const cardio = (await hevyRecentActivity(activityClient(), { type: 'cardio' })) as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(cardio.muscle_groups as object)).toEqual(['cardio']);
+    // Session metadata stays window-wide whatever the breakdown is filtered to.
+    expect(cardio.total_workouts).toBe(2);
+  });
+
+  it('narrows to one group with specific, which implies its type so depth 1 is allowed', async () => {
+    const result = (await hevyRecentActivity(activityClient(), {
+      specific: 'triceps',
+      depth: 1,
+    })) as Record<string, unknown>;
+    expect(result).toMatchObject({ type: 'muscles', specific: 'triceps' });
+    expect(Object.keys(result.muscle_groups as object)).toEqual(['triceps']);
+  });
+
+  it('merges two workouts on the same day into one date bucket', async () => {
     const client = fakeHevy({
+      templates: ACTIVITY_TEMPLATES,
       workoutPages: [
         [
           {
-            title: 'Push',
+            id: 'w-pm',
             start_time: daysAgo(1),
             exercises: [
               {
-                title: 'Bench Press',
-                exercise_template_id: 'tmpl-bench',
-                sets: [{ type: 'normal', weight_kg: 100, reps: 5 }],
+                title: 'Bicep Curl',
+                exercise_template_id: 'tmpl-curl',
+                sets: [{ type: 'normal', weight_kg: 10, reps: 10 }],
+              },
+            ],
+          },
+          {
+            id: 'w-am',
+            start_time: daysAgo(1),
+            exercises: [
+              {
+                title: 'Bicep Curl',
+                exercise_template_id: 'tmpl-curl',
+                sets: [{ type: 'normal', weight_kg: 12, reps: 8 }],
               },
             ],
           },
         ],
       ],
-      templates: [
-        {
-          id: 'tmpl-bench',
-          title: 'Bench Press',
-          primary_muscle_group: 'chest',
-          secondary_muscle_groups: ['triceps', 'shoulders'],
-        },
-      ],
     });
-    const result = (await hevyActivityByMuscle(client, { days: 7 })) as Record<string, unknown>;
-    const groups = result.muscle_groups as {
-      muscle_group: string;
-      as_primary: number;
-      as_secondary: number;
-      total_volume_kg: number;
-    }[];
-    expect(groups.map(group => group.muscle_group)).toEqual(['chest', 'triceps', 'shoulders']);
-    expect(groups[0]).toMatchObject({ as_primary: 1, as_secondary: 0, total_volume_kg: 500 });
-    expect(groups[1]).toMatchObject({ as_primary: 0, as_secondary: 1 });
+    const result = (await hevyRecentActivity(client, { specific: 'biceps', depth: 1 })) as Record<
+      string,
+      unknown
+    >;
+    const groups = result.muscle_groups as Record<string, Record<string, Record<string, unknown>>>;
+    const day = groups.biceps[dayOf(daysAgo(1))];
+    expect(day).toMatchObject({ total_sets: 2, total_volume_kg: 196 });
+    expect(day.exercises_text).toEqual({
+      'Bicep Curl': '2 sets of 8-10 repetitions each with min of 10kg, max of 12kg.',
+    });
   });
 
   it('falls back to the "other" group for unknown templates', async () => {
@@ -367,6 +497,7 @@ describe('hevyActivityByMuscle', () => {
       workoutPages: [
         [
           {
+            id: 'w1',
             title: 'Mystery',
             start_time: daysAgo(1),
             exercises: [
@@ -380,56 +511,168 @@ describe('hevyActivityByMuscle', () => {
         ],
       ],
     });
-    const result = (await hevyActivityByMuscle(client, {})) as Record<string, unknown>;
-    const groups = result.muscle_groups as { muscle_group: string }[];
-    expect(groups.map(group => group.muscle_group)).toEqual(['other']);
+    const result = (await hevyRecentActivity(client, {})) as Record<string, unknown>;
+    expect(Object.keys(result.muscle_groups as object)).toEqual(['other']);
+  });
+
+  it('refuses depth 1 without a narrowed type, and beyond 4 days', async () => {
+    const client = activityClient();
+    await expect(hevyRecentActivity(client, { depth: 1 })).rejects.toThrow(/narrower scope/);
+    await expect(hevyRecentActivity(client, { type: 'all', depth: 1 })).rejects.toThrow(
+      /narrower scope/,
+    );
+    await expect(
+      hevyRecentActivity(client, { type: 'muscles', depth: 1, days: 10 }),
+    ).rejects.toThrow(/at most 4 days/);
+    // No request should have been made for any of the three.
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it('refuses an unknown muscle group and a contradictory type', async () => {
+    const client = activityClient();
+    await expect(hevyRecentActivity(client, { specific: 'lungs' })).rejects.toThrow(
+      /unknown muscle group/,
+    );
+    await expect(
+      hevyRecentActivity(client, { specific: 'triceps', type: 'cardio' }),
+    ).rejects.toThrow(/contradicts/);
+    await expect(hevyRecentActivity(client, { specific: 'cardio', type: 'muscles' })).rejects.toThrow(
+      /contradicts/,
+    );
   });
 });
 
 const TEMPLATES = [
-  { id: '79D0BB3A', title: 'Bench Press (Barbell)', primary_muscle_group: 'chest' },
+  {
+    id: '79D0BB3A',
+    title: 'Bench Press (Barbell)',
+    primary_muscle_group: 'chest',
+    secondary_muscle_groups: ['triceps'],
+    equipment: 'barbell',
+  },
   { id: '3601968B', title: 'Bench Press (Dumbbell)', primary_muscle_group: 'chest' },
   { id: 'D04AC939', title: 'Squat (Barbell)', primary_muscle_group: 'quadriceps' },
+  { id: 'C6272009', title: 'Triceps Pushdown', primary_muscle_group: 'triceps' },
 ];
 
-describe('hevySearchExercises', () => {
-  it('ranks an exact title first', async () => {
+describe('hevySearchExerciseCatalog', () => {
+  it('ranks an exact title first and reports the id under its write-side name', async () => {
     const client = fakeHevy({ templates: TEMPLATES });
-    const result = (await hevySearchExercises(client, { query: 'Bench Press (Barbell)' })) as {
-      match_count: number;
-      matches: { id: string }[];
-    };
-    expect(result.matches[0].id).toBe('79D0BB3A');
+    const result = (await hevySearchExerciseCatalog(client, {
+      query: 'Bench Press (Barbell)',
+    })) as { match_count: number; matches: Record<string, unknown>[] };
+    expect(result.matches[0]).toMatchObject({
+      exercise_template_id: '79D0BB3A',
+      title: 'Bench Press (Barbell)',
+      equipment: 'barbell',
+      is_custom: false,
+    });
     // "(barbell)" excludes the dumbbell variant, so the full title matches exactly one template.
     expect(result.match_count).toBe(1);
   });
 
   it('returns both variants for a partial name, shortest title first', async () => {
     const client = fakeHevy({ templates: TEMPLATES });
-    const result = (await hevySearchExercises(client, { query: 'bench press' })) as {
+    const result = (await hevySearchExerciseCatalog(client, { query: 'bench press' })) as {
       match_count: number;
-      matches: { id: string }[];
+      matches: { exercise_template_id: string }[];
     };
     expect(result.match_count).toBe(2);
-    expect(result.matches[0].id).toBe('79D0BB3A');
+    expect(result.matches[0].exercise_template_id).toBe('79D0BB3A');
   });
 
   it('honours the limit', async () => {
     const client = fakeHevy({ templates: TEMPLATES });
-    const result = (await hevySearchExercises(client, { query: 'bench press', limit: 1 })) as {
-      match_count: number;
-    };
+    const result = (await hevySearchExerciseCatalog(client, {
+      query: 'bench press',
+      limit: 1,
+    })) as { match_count: number };
     expect(result.match_count).toBe(1);
   });
 
   it('returns nothing for a query that matches no template', async () => {
     const client = fakeHevy({ templates: TEMPLATES });
-    const result = (await hevySearchExercises(client, { query: 'deadlift' })) as {
+    const result = (await hevySearchExerciseCatalog(client, { query: 'deadlift' })) as {
       match_count: number;
     };
     expect(result.match_count).toBe(0);
   });
+
+  it('browses a muscle group without a query, primary role first', async () => {
+    const client = fakeHevy({ templates: TEMPLATES });
+    const result = (await hevySearchExerciseCatalog(client, { muscleGroup: 'triceps' })) as {
+      match_count: number;
+      total_in_group: number;
+      matches: { title: string }[];
+    };
+    expect(result.match_count).toBe(2);
+    expect(result.total_in_group).toBe(2);
+    expect(result.matches.map(match => match.title)).toEqual([
+      'Triceps Pushdown',
+      'Bench Press (Barbell)',
+    ]);
+  });
+
+  it('intersects a query with a muscle group', async () => {
+    const client = fakeHevy({ templates: TEMPLATES });
+    const result = (await hevySearchExerciseCatalog(client, {
+      query: 'bench press',
+      muscleGroup: 'triceps',
+    })) as { match_count: number; matches: { exercise_template_id: string }[] };
+    expect(result.match_count).toBe(1);
+    expect(result.matches[0].exercise_template_id).toBe('79D0BB3A');
+  });
+
+  it('refuses an empty search and an unknown muscle group', async () => {
+    const client = fakeHevy({ templates: TEMPLATES });
+    await expect(hevySearchExerciseCatalog(client, {})).rejects.toThrow(/pass query/);
+    await expect(hevySearchExerciseCatalog(client, { muscleGroup: 'lungs' })).rejects.toThrow(
+      /unknown muscle group/,
+    );
+  });
 });
+
+describe('hevyGetWorkout', () => {
+  it('unwraps the single-workout envelope when there is one', async () => {
+    const enveloped = fakeHevy({ byId: { '/v1/workouts/w1': { workout: { id: 'w1' } } } });
+    expect(await hevyGetWorkout(enveloped, { workoutId: 'w1' })).toEqual({ id: 'w1' });
+
+    const bare = fakeHevy({ byId: { '/v1/workouts/w1': { id: 'w1', title: 'Push' } } });
+    expect(await hevyGetWorkout(bare, { workoutId: 'w1' })).toEqual({ id: 'w1', title: 'Push' });
+  });
+});
+
+/** A routine as the API returns it, with the read-shape keys and a planned rep_range. */
+const LISTED_ROUTINE = {
+  id: 'r1',
+  title: 'Upper A',
+  folder_id: null,
+  notes: null,
+  exercises: [
+    {
+      index: 0,
+      title: 'Bench Press (Barbell)',
+      exercise_template_id: '79D0BB3A',
+      rest_seconds: '90',
+      notes: null,
+      supersets_id: null,
+      sets: [
+        { type: 'warmup', weight_kg: 20, reps: 10 },
+        { type: 'normal', weight_kg: 60, reps: null, rep_range: { start: 8, end: 12 } },
+        { type: 'normal', weight_kg: 65, reps: null, rep_range: { start: 8, end: 12 } },
+      ],
+    },
+    {
+      index: 1,
+      title: 'Triceps Pushdown',
+      exercise_template_id: 'C6272009',
+      rest_seconds: null,
+      notes: 'slow eccentric',
+      supersets_id: 2,
+      sets: [{ type: 'normal', weight_kg: 30, reps: 12 }],
+    },
+  ],
+};
 
 describe('hevyRoutines', () => {
   it('paginates the full list', async () => {
@@ -440,9 +683,157 @@ describe('hevyRoutines', () => {
     expect(result.routine_count).toBe(3);
   });
 
-  it('unwraps the single-routine envelope', async () => {
-    const client = fakeHevy({ byId: { '/v1/routines/r1': { routine: { id: 'r1', title: 'A' } } } });
-    expect(await hevyRoutines(client, { routineId: 'r1' })).toEqual({ id: 'r1', title: 'A' });
+  it('summarizes each exercise in one line, keyed by its position in the plan', async () => {
+    const client = fakeHevy({ byId: { '/v1/routines/r1': { routine: LISTED_ROUTINE } } });
+    const result = (await hevyRoutines(client, { routineId: 'r1' })) as Record<string, unknown>;
+    expect(result).toMatchObject({
+      routine_id: 'r1',
+      title: 'Upper A',
+      exercise_count: 2,
+      total_sets: 4,
+    });
+    expect(result.exercises).toEqual({
+      // rep_range feeds the rep clause, and the warmup is counted rather than described.
+      '1. Bench Press (Barbell)':
+        '2 sets of 8-12 repetitions each with min of 60kg, max of 65kg (+1 warmup). 90s rest.',
+      '2. Triceps Pushdown': '1 set of 12 repetitions each at 30kg. Superset 2. Note: slow eccentric',
+    });
+  });
+
+  it('omits null fields instead of showing them', async () => {
+    const client = fakeHevy({ byId: { '/v1/routines/r1': { routine: LISTED_ROUTINE } } });
+    const result = (await hevyRoutines(client, { routineId: 'r1' })) as Record<string, unknown>;
+    expect(result).not.toHaveProperty('folder_id');
+    expect(result).not.toHaveProperty('notes');
+
+    const filed = fakeHevy({
+      byId: { '/v1/routines/r2': { routine: { ...LISTED_ROUTINE, folder_id: 7, notes: 'heavy' } } },
+    });
+    expect(await hevyRoutines(filed, { routineId: 'r2' })).toMatchObject({
+      folder_id: 7,
+      notes: 'heavy',
+    });
+  });
+
+  it('never returns raw set objects', async () => {
+    const client = fakeHevy({ routinePages: [[LISTED_ROUTINE]] });
+    const result = (await hevyRoutines(client, {})) as { routines: Record<string, unknown>[] };
+    expect(JSON.stringify(result)).not.toContain('weight_kg');
+  });
+});
+
+describe('hevyBodyMeasurements', () => {
+  const measurementClient = (
+    pages: unknown[][],
+  ): HevyClient & { calls: HevyCall[] } => {
+    const calls: HevyCall[] = [];
+    return {
+      calls,
+      async get(endpoint, params) {
+        calls.push({ method: 'GET', endpoint });
+        if (endpoint === '/v1/body_measurements') {
+          const page = Number(params?.page ?? '1');
+          return {
+            page,
+            page_count: pages.length,
+            body_measurements: pages[page - 1] ?? [],
+          };
+        }
+        if (endpoint.startsWith('/v1/body_measurements/')) {
+          const date = endpoint.split('/').pop();
+          const all = pages.flat() as { date?: string }[];
+          const found = all.find(entry => entry.date === date);
+          if (!found) {
+            throw new Error('Body measurement not found');
+          }
+          return found;
+        }
+        throw new Error(`Unexpected endpoint: ${endpoint}`);
+      },
+      async post() {
+        throw new Error('unexpected write');
+      },
+      async put() {
+        throw new Error('unexpected write');
+      },
+    };
+  };
+
+  const ENTRIES = [
+    [
+      { id: 1, date: '2026-08-01', weight_kg: 80, fat_percent: null, created_at: 'x' },
+      { id: 2, date: '2026-07-01', weight_kg: 81.5, chest_cm: 95 },
+    ],
+    [{ id: 3, date: '2026-08-05', weight_kg: 79.4, lean_mass_kg: 65 }],
+  ];
+
+  it('sorts newest first across pages rather than trusting the API order', async () => {
+    const client = measurementClient(ENTRIES);
+    const result = (await hevyBodyMeasurements(client, {})) as {
+      total_recorded: number;
+      entry_count: number;
+      measurements: { date: string }[];
+    };
+    expect(result.total_recorded).toBe(3);
+    expect(result.entry_count).toBe(3);
+    expect(result.measurements.map(entry => entry.date)).toEqual([
+      '2026-08-05',
+      '2026-08-01',
+      '2026-07-01',
+    ]);
+  });
+
+  it('drops null fields and API bookkeeping', async () => {
+    const client = measurementClient(ENTRIES);
+    const result = (await hevyBodyMeasurements(client, { limit: 1 })) as {
+      measurements: Record<string, unknown>[];
+    };
+    expect(result.measurements[0]).toEqual({
+      date: '2026-08-05',
+      weight_kg: 79.4,
+      lean_mass_kg: 65,
+    });
+    const older = (await hevyBodyMeasurements(client, { limit: 2 })) as {
+      measurements: Record<string, unknown>[];
+    };
+    expect(older.measurements[1]).toEqual({ date: '2026-08-01', weight_kg: 80 });
+  });
+
+  it('honours the limit and the days window', async () => {
+    const client = measurementClient([
+      [
+        { date: daysAgo(1).slice(0, 10), weight_kg: 80 },
+        { date: daysAgo(60).slice(0, 10), weight_kg: 82 },
+      ],
+    ]);
+    const windowed = (await hevyBodyMeasurements(client, { days: 30 })) as {
+      period_days: number;
+      total_recorded: number;
+      entry_count: number;
+    };
+    expect(windowed).toMatchObject({ period_days: 30, total_recorded: 2, entry_count: 1 });
+
+    const limited = (await hevyBodyMeasurements(client, { limit: 1 })) as { entry_count: number };
+    expect(limited.entry_count).toBe(1);
+  });
+
+  it('fetches a single date directly', async () => {
+    const client = measurementClient(ENTRIES);
+    const result = (await hevyBodyMeasurements(client, { date: '2026-07-01' })) as {
+      measurement: Record<string, unknown>;
+    };
+    expect(result.measurement).toEqual({ date: '2026-07-01', weight_kg: 81.5, chest_cm: 95 });
+    expect(client.calls).toEqual([
+      { method: 'GET', endpoint: '/v1/body_measurements/2026-07-01' },
+    ]);
+  });
+
+  it('rejects a malformed date before calling the API', async () => {
+    const client = measurementClient(ENTRIES);
+    await expect(hevyBodyMeasurements(client, { date: '01-07-2026' })).rejects.toThrow(
+      /must be YYYY-MM-DD/,
+    );
+    expect(client.calls).toHaveLength(0);
   });
 });
 
@@ -628,80 +1019,6 @@ describe('hevyWriteRoutine', () => {
     await expect(
       hevyWriteRoutine(client, { exercises: [{ exercise_template_id: 'X1', reps: 5 }] }),
     ).rejects.toThrow(/requires a title/);
-  });
-});
-
-const FETCHED_WORKOUT = {
-  id: 'w1',
-  title: 'Push',
-  start_time: '2026-08-01T18:00:00Z',
-  end_time: '2026-08-01T19:00:00Z',
-  description: 'solid',
-  exercises: [
-    {
-      index: 0,
-      title: 'Bench Press (Barbell)',
-      exercise_template_id: '79D0BB3A',
-      supersets_id: null,
-      sets: [{ index: 0, type: 'normal', weight_kg: 60, reps: 8, rpe: 8.5 }],
-    },
-  ],
-};
-
-describe('hevyWriteWorkout', () => {
-  it('POSTs a new workout when no id is given', async () => {
-    const client = fakeHevy({ templates: TEMPLATES });
-    await hevyWriteWorkout(client, {
-      title: 'Push',
-      startTime: '2026-08-06T18:00:00Z',
-      endTime: '2026-08-06T19:00:00Z',
-      exercises: [{ exercise: 'Bench Press (Barbell)', sets: 2, reps: 8, weight_kg: 60, rpe: 8 }],
-    });
-    const write = client.calls.find(call => call.method === 'POST');
-    expect(write?.endpoint).toBe('/v1/workouts');
-    const body = write?.body as { workout: { exercises: { sets: { rpe?: number }[] }[] } };
-    expect(body.workout.exercises[0].sets).toHaveLength(2);
-    expect(body.workout.exercises[0].sets[0].rpe).toBe(8);
-  });
-
-  it('preserves title, times, exercises and rpe when updating only the description', async () => {
-    const client = fakeHevy({ byId: { '/v1/workouts/w1': FETCHED_WORKOUT } });
-    await hevyWriteWorkout(client, { workoutId: 'w1', description: 'edited' });
-
-    const body = client.calls.find(call => call.method === 'PUT')?.body as {
-      workout: {
-        title: string;
-        start_time: string;
-        description: string;
-        exercises: { sets: { rpe?: number }[] }[];
-      };
-    };
-    expect(body.workout).toMatchObject({
-      title: 'Push',
-      start_time: '2026-08-01T18:00:00Z',
-      description: 'edited',
-    });
-    expect(body.workout.exercises[0].sets[0].rpe).toBe(8.5);
-  });
-
-  it('requires exercises when creating', async () => {
-    const client = fakeHevy({});
-    await expect(
-      hevyWriteWorkout(client, { title: 'Push', startTime: 'a', endTime: 'b' }),
-    ).rejects.toThrow(/requires exercises/);
-  });
-
-  it('rejects rest_seconds on a logged workout before any request is made', async () => {
-    const client = fakeHevy({});
-    await expect(
-      hevyWriteWorkout(client, {
-        title: 'Push',
-        startTime: '2026-08-06T18:00:00Z',
-        endTime: '2026-08-06T19:00:00Z',
-        exercises: [{ exercise_template_id: '79D0BB3A', reps: 5, rest_seconds: 60 }],
-      }),
-    ).rejects.toThrow(/rest_seconds is a routine planning field/);
-    expect(client.calls).toHaveLength(0);
   });
 });
 

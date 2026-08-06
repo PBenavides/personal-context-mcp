@@ -5,16 +5,22 @@
  *
  * Two Hevy quirks this module exists to hide:
  *
- *  - Reads return `supersets_id`; writes expect `superset_id`. `*ToWriteShape` translates, so
- *    supersets survive a read-edit-write round trip instead of being silently dropped.
+ *  - Reads return `supersets_id`; writes expect `superset_id`. `routineToWriteShape` translates,
+ *    so supersets survive a read-edit-write round trip instead of being silently dropped.
  *  - There is no PATCH. `PUT` replaces the whole object, so anything absent from the payload is
- *    deleted — partial updates must re-send everything, which is what `*ToWriteShape` enables.
+ *    deleted — partial updates must re-send everything, which is what `routineToWriteShape`
+ *    enables.
  *
  * Field support differs by target, and sending the wrong one is a 400:
  *
  *    workout sets  type, weight_kg, reps, distance_meters, duration_seconds, custom_metric, rpe
  *    routine sets  type, weight_kg, reps, distance_meters, duration_seconds, custom_metric,
  *                  rep_range
+ *
+ * The routine is the only write target today — `hevy_write_workout` and
+ * `hevy_create_custom_exercise` were retired on 2026-08-06 and their body builders deleted with
+ * them. The `forRoutine` flag and its workout branch stay because the distinction is real in the
+ * API and the rules are cheaper to keep than to re-derive.
  */
 
 /** Enum values mirrored from the Hevy OpenAPI spec (https://api.hevyapp.com/docs). */
@@ -27,19 +33,7 @@ export const MUSCLE_GROUPS = [
   'chest', 'cardio', 'neck', 'full_body', 'other',
 ] as const;
 
-export const EQUIPMENT_CATEGORIES = [
-  'none', 'barbell', 'dumbbell', 'kettlebell', 'machine', 'plate', 'resistance_band',
-  'suspension', 'other',
-] as const;
-
-export const CUSTOM_EXERCISE_TYPES = [
-  'weight_reps', 'reps_only', 'bodyweight_reps', 'bodyweight_assisted_reps', 'duration',
-  'weight_duration', 'distance_duration', 'short_distance_weight',
-] as const;
-
 export type MuscleGroup = (typeof MUSCLE_GROUPS)[number];
-export type EquipmentCategory = (typeof EQUIPMENT_CATEGORIES)[number];
-export type CustomExerciseType = (typeof CUSTOM_EXERCISE_TYPES)[number];
 
 /** Measurement fields shared by workout and routine sets. */
 const COMMON_SET_FIELDS = [
@@ -104,33 +98,12 @@ export interface BuiltExercise {
   sets: BuiltSet[];
 }
 
-export interface WorkoutBody {
-  workout: {
-    title: string;
-    start_time: string;
-    end_time: string;
-    description?: string;
-    is_private?: boolean;
-    exercises: BuiltExercise[];
-  };
-}
-
 export interface RoutineBody {
   routine: {
     title: string;
     notes?: string;
     folder_id?: number | null;
     exercises: BuiltExercise[];
-  };
-}
-
-export interface CustomExerciseBody {
-  exercise: {
-    title: string;
-    exercise_type: string;
-    equipment_category: string;
-    muscle_group: string;
-    other_muscles: string[];
   };
 }
 
@@ -362,7 +335,7 @@ export function buildExercise(
     if (typeof name !== 'string' || name.trim() === '') {
       throw new HevyPayloadError(
         "exercise requires 'exercise_template_id' or 'exercise' (a name); " +
-          'use hevy_search_exercises to look up template ids',
+          'use hevy_search_exercise_catalog to look up template ids',
       );
     }
     if (!resolve) {
@@ -427,43 +400,6 @@ export function buildExercises(
 // ---------------------------------------------------------------------------
 
 /**
- * Body for `POST /v1/workouts` and `PUT /v1/workouts/{id}` — both take the same shape, and the
- * PUT replaces the workout wholesale.
- */
-export function buildWorkoutBody(args: {
-  title: string;
-  startTime: string;
-  endTime: string;
-  exercises: unknown;
-  description?: string;
-  isPrivate?: boolean;
-  resolve?: TemplateResolver;
-}): WorkoutBody {
-  if (!args.title) {
-    throw new HevyPayloadError('workout requires a title');
-  }
-  if (!args.startTime || !args.endTime) {
-    throw new HevyPayloadError(
-      'workout requires start_time and end_time in ISO 8601 format (e.g. 2026-08-06T18:00:00Z)',
-    );
-  }
-
-  const workout: WorkoutBody['workout'] = {
-    title: args.title,
-    start_time: args.startTime,
-    end_time: args.endTime,
-    exercises: buildExercises(args.exercises, false, args.resolve),
-  };
-  if (args.description !== undefined) {
-    workout.description = args.description;
-  }
-  if (args.isPrivate !== undefined) {
-    workout.is_private = args.isPrivate;
-  }
-  return { workout };
-}
-
-/**
  * Body for `POST /v1/routines` and `PUT /v1/routines/{id}`.
  *
  * `includeFolderId` must be false when building an update: the API rejects `folder_id` on PUT,
@@ -502,56 +438,6 @@ export function buildRoutineBody(args: {
     );
   }
   return { routine };
-}
-
-/** Body for `POST /v1/exercise_templates`. */
-export function buildCustomExerciseBody(args: {
-  title: string;
-  exerciseType: string;
-  equipmentCategory: string;
-  muscleGroup: string;
-  otherMuscles?: string[];
-}): CustomExerciseBody {
-  if (!args.title) {
-    throw new HevyPayloadError('custom exercise requires a title');
-  }
-  if (!CUSTOM_EXERCISE_TYPES.includes(args.exerciseType as CustomExerciseType)) {
-    throw new HevyPayloadError(
-      `exercise_type ${JSON.stringify(args.exerciseType)} is invalid; expected one of ` +
-        CUSTOM_EXERCISE_TYPES.join(', '),
-    );
-  }
-  if (!EQUIPMENT_CATEGORIES.includes(args.equipmentCategory as EquipmentCategory)) {
-    throw new HevyPayloadError(
-      `equipment_category ${JSON.stringify(args.equipmentCategory)} is invalid; expected one of ` +
-        EQUIPMENT_CATEGORIES.join(', '),
-    );
-  }
-  if (!MUSCLE_GROUPS.includes(args.muscleGroup as MuscleGroup)) {
-    throw new HevyPayloadError(
-      `muscle_group ${JSON.stringify(args.muscleGroup)} is invalid; expected one of ` +
-        MUSCLE_GROUPS.join(', '),
-    );
-  }
-  const others = args.otherMuscles ?? [];
-  for (const muscle of others) {
-    if (!MUSCLE_GROUPS.includes(muscle as MuscleGroup)) {
-      throw new HevyPayloadError(
-        `other_muscles entry ${JSON.stringify(muscle)} is invalid; expected one of ` +
-          MUSCLE_GROUPS.join(', '),
-      );
-    }
-  }
-
-  return {
-    exercise: {
-      title: args.title,
-      exercise_type: args.exerciseType,
-      equipment_category: args.equipmentCategory,
-      muscle_group: args.muscleGroup,
-      other_muscles: others,
-    },
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -625,9 +511,4 @@ function exerciseToWriteShape(readExercise: ReadExercise, forRoutine: boolean): 
 /** Convert a fetched routine's exercises into update-ready specs. */
 export function routineToWriteShape(routine: { exercises?: ReadExercise[] }): BuiltExercise[] {
   return (routine.exercises ?? []).map(ex => exerciseToWriteShape(ex, true));
-}
-
-/** Convert a fetched workout's exercises into update-ready specs. */
-export function workoutToWriteShape(workout: { exercises?: ReadExercise[] }): BuiltExercise[] {
-  return (workout.exercises ?? []).map(ex => exerciseToWriteShape(ex, false));
 }
