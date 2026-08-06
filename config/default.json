@@ -20,6 +20,35 @@
       "index": "",
       "region": "us-east-1",
       "embedModelId": "amazon.titan-embed-text-v2:0"
+    },
+    "ontology": {
+      "source": "file",
+      "rootDir": "data/ontology",
+      "bucket": "",
+      "prefix": "ontology/",
+      "region": "us-east-1",
+      "syncEnabled": false,
+      "maxDocsPerRun": 25
+    },
+    "openRouter": {
+      "apiKey": "",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "chatModel": "openai/gpt-4o-mini",
+      "embedModel": "openai/text-embedding-3-small"
+    },
+    "ynab": {
+      "token": "",
+      "baseUrl": "https://api.ynab.com/v1"
+    },
+    "hevy": {
+      "apiKey": "",
+      "baseUrl": "https://api.hevyapp.com"
+    },
+    "googleCalendar": {
+      "refreshToken": "",
+      "clientId": "",
+      "clientSecret": "",
+      "baseUrl": "https://www.googleapis.com/calendar/v3"
     }
   },
   "security": {

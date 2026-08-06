@@ -4,6 +4,8 @@ import type { FastifyInstance } from 'fastify';
 import { appConfig } from './config.js';
 import { getConnections } from './connections/registry.js';
 import { createContext } from './context.js';
+import { startOntologyScheduler } from './ontology/scheduler.js';
+import { isSyncRunning, runSync, setSyncLogger } from './ontology/sync-runner.js';
 import { buildServer } from './server.js';
 
 /** Closes the server on SIGTERM/SIGINT so in-flight requests can finish before the process exits. */
@@ -30,6 +32,15 @@ async function main(): Promise<void> {
   corpus.startRefresh(context.logger);
   const health = await corpus.healthCheck();
   context.logger.info({ corpus: health.detail }, 'enriched corpus loaded');
+
+  setSyncLogger(context.logger);
+  if (appConfig.connections.ontology.syncEnabled) {
+    startOntologyScheduler({
+      logger: context.logger,
+      run: () => runSync(),
+      isRunning: isSyncRunning,
+    });
+  }
 
   const server = await buildServer(context);
   registerShutdown(server);

@@ -26,6 +26,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "config": "^3.3.12",
     "dotenv": "^16.4.5",
+    "fast-xml-parser": "^4.5.7",
     "fastify": "^5.10.0",
     "fastify-plugin": "^6.0.0",
     "pino": "^10.3.1",

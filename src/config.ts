@@ -29,6 +29,65 @@ export interface ConnectionsConfig {
     /** Bedrock embedding model id; must match what the pipeline embedded documents with. */
     embedModelId: string;
   };
+  /**
+   * The ontology registry (see `src/connections/ontology-store.ts`): RDF/XML (OWL) graph built
+   * from the enriched corpus by the injector, persisted versioned under `prefix` (S3) or
+   * `rootDir` (local file mode — dev/tests, credential-free).
+   */
+  ontology: {
+    source: 'file' | 's3';
+    rootDir: string;
+    bucket: string;
+    prefix: string;
+    region: string;
+    /** Hourly top-of-hour injector sync (see `src/ontology/scheduler.ts`). */
+    syncEnabled: boolean;
+    /** Per-sync-run cap on documents routed through the LLM, bounds cost. */
+    maxDocsPerRun: number;
+  };
+  /**
+   * OpenRouter (LLM + embeddings) behind the ontology injector and `ontology_search`.
+   * Empty `apiKey` disables it: search falls back to keyword scoring, sync reports itself
+   * unconfigured. Key comes from `OPENROUTER_API_KEY` (SSM in production) — never from code.
+   */
+  openRouter: {
+    apiKey: string;
+    baseUrl: string;
+    chatModel: string;
+    embedModel: string;
+  };
+  /**
+   * YNAB (You Need A Budget) REST API behind the personal-tools MCP (see
+   * `src/connections/ynab.ts`). Empty `token` disables it — ynab_* tools report themselves
+   * unconfigured. Token comes from `YNAB_TOKEN` (SSM in production) — never from code.
+   */
+  ynab: {
+    token: string;
+    baseUrl: string;
+  };
+  /**
+   * Hevy workout-tracking API behind the personal-tools MCP (see `src/connections/hevy.ts`).
+   * Empty `apiKey` disables it — hevy_* tools report themselves unconfigured. Key comes from
+   * `HEVY_API_KEY` (SSM in production; requires Hevy Pro) — never from code.
+   */
+  hevy: {
+    apiKey: string;
+    baseUrl: string;
+  };
+  /**
+   * Google Calendar v3 REST API behind the personal-tools MCP (see
+   * `src/connections/google-calendar.ts`). Unlike YNAB/Hevy this is OAuth-refresh-token
+   * based: a long-lived `refreshToken` (minted once via an interactive browser flow, see
+   * `docs/personal-tools.md`) plus the OAuth client id/secret are exchanged for short-lived
+   * access tokens. Any of the three empty ⇒ disabled — gcal_* tools report themselves
+   * unconfigured. All three come from env (SSM in production) — never from code.
+   */
+  googleCalendar: {
+    refreshToken: string;
+    clientId: string;
+    clientSecret: string;
+    baseUrl: string;
+  };
 }
 
 export interface AppConfig {
@@ -72,6 +131,16 @@ export const appConfig: AppConfig = {
       refreshSeconds: Number(config.get<number | string>('connections.enrichedCorpus.refreshSeconds')),
     },
     vectorSearch: config.get<ConnectionsConfig['vectorSearch']>('connections.vectorSearch'),
+    ontology: {
+      ...config.get<ConnectionsConfig['ontology']>('connections.ontology'),
+      syncEnabled:
+        String(config.get<boolean | string>('connections.ontology.syncEnabled')) === 'true',
+      maxDocsPerRun: Number(config.get<number | string>('connections.ontology.maxDocsPerRun')),
+    },
+    openRouter: config.get<ConnectionsConfig['openRouter']>('connections.openRouter'),
+    ynab: config.get<ConnectionsConfig['ynab']>('connections.ynab'),
+    hevy: config.get<ConnectionsConfig['hevy']>('connections.hevy'),
+    googleCalendar: config.get<ConnectionsConfig['googleCalendar']>('connections.googleCalendar'),
   },
   security: config.get<AppConfig['security']>('security'),
 };

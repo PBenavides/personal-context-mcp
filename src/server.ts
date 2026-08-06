@@ -4,6 +4,7 @@ import { createServer } from './fastify-factory.js';
 import { mountMcp } from './registry/mount.js';
 import { getRegistry } from './registry/registry.js';
 import { registerManagementRoutes } from './routes.js';
+import { registerVisualOntologies } from './visual-ontologies/routes.js';
 
 /**
  * Builds the MCP host server: the local `createServer()` (see `fastify-factory.ts`) provides
@@ -24,6 +25,7 @@ export async function buildServer(
   });
 
   registerManagementRoutes(server);
+  registerVisualOntologies(server);
 
   const mountOptions = {
     enableDnsRebindingProtection: context.config.security.dnsRebindingProtection,

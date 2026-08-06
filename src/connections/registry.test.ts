@@ -32,6 +32,35 @@ const configuredConfig: AppConfig['connections'] = {
     region: 'us-east-1',
     embedModelId: 'amazon.titan-embed-text-v2:0',
   },
+  ontology: {
+    source: 'file',
+    rootDir: 'tests/fixtures/ontology',
+    bucket: '',
+    prefix: 'ontology/',
+    region: 'us-east-1',
+    syncEnabled: false,
+    maxDocsPerRun: 25,
+  },
+  openRouter: {
+    apiKey: '',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    chatModel: 'openai/gpt-4o-mini',
+    embedModel: 'openai/text-embedding-3-small',
+  },
+  ynab: {
+    token: '',
+    baseUrl: 'https://api.ynab.com/v1',
+  },
+  hevy: {
+    apiKey: '',
+    baseUrl: 'https://api.hevyapp.com',
+  },
+  googleCalendar: {
+    refreshToken: '',
+    clientId: '',
+    clientSecret: '',
+    baseUrl: 'https://www.googleapis.com/calendar/v3',
+  },
 };
 
 describe('validateConnections', () => {
@@ -51,21 +80,43 @@ describe('validateConnections', () => {
 });
 
 describe('createConnections', () => {
-  it('returns both connections with the correct kinds', () => {
+  it('returns all connections with the correct kinds', () => {
     const registry = createConnections(configuredConfig);
     expect(registry.enrichedCorpus.kind).toBe('enriched-corpus');
     expect(registry.vectorSearch.kind).toBe('vector-search');
-    expect(registry.all()).toEqual([registry.enrichedCorpus, registry.vectorSearch]);
+    expect(registry.ontologyStore.kind).toBe('ontology-store');
+    expect(registry.openRouter.kind).toBe('openrouter');
+    expect(registry.ynab.kind).toBe('ynab');
+    expect(registry.hevy.kind).toBe('hevy');
+    expect(registry.googleCalendar.kind).toBe('google-calendar');
+    expect(registry.all()).toEqual([
+      registry.enrichedCorpus,
+      registry.vectorSearch,
+      registry.ontologyStore,
+      registry.openRouter,
+      registry.ynab,
+      registry.hevy,
+      registry.googleCalendar,
+    ]);
   });
 
-  it('healthCheckAll() reports corpus not-loaded before load(), vector search inert', async () => {
+  it('healthCheckAll() reports corpus not-loaded before load(), the rest inert', async () => {
     const registry = createConnections(configuredConfig);
     const results = await registry.healthCheckAll();
-    expect(results).toHaveLength(2);
+    expect(results).toHaveLength(7);
     expect(results[0].ok).toBe(false);
     expect(results[0].detail).toMatch(/not loaded/);
     expect(results[1].ok).toBe(true);
     expect(results[1].detail).toMatch(/BM25/);
+    expect(results[2].ok).toBe(true);
+    expect(results[3].ok).toBe(true);
+    expect(results[3].detail).toMatch(/not configured/);
+    expect(results[4].ok).toBe(true);
+    expect(results[4].detail).toMatch(/not configured/);
+    expect(results[5].ok).toBe(true);
+    expect(results[5].detail).toMatch(/not configured/);
+    expect(results[6].ok).toBe(true);
+    expect(results[6].detail).toMatch(/not configured/);
   });
 
   it('healthCheckAll() reports ok after load()', async () => {

@@ -1,3 +1,6 @@
 {
-  "logger": { "level": "silent" }
+  "logger": { "level": "silent" },
+  "connections": {
+    "ontology": { "rootDir": "tests/fixtures/ontology-empty" }
+  }
 }

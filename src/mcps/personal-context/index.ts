@@ -1,8 +1,10 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { getConnections } from '../../connections/registry.js';
+import { runSync } from '../../ontology/sync-runner.js';
 import type { McpDefinition } from '../../registry/types.js';
 import { getAppVersion } from '../../version.js';
+import { ontologySearch, ontologyUpdate } from './ontology-tools.js';
 import { getDocument, listTaxonomy, searchContext } from './tools.js';
 
 const NAME = 'personal-context';
@@ -13,7 +15,11 @@ const INSTRUCTIONS =
   "Semantic search over Pablo's enriched personal context: Obsidian vault notes and " +
   'activity events, classified into a closed 14-category taxonomy (Goal, Project, Person, ' +
   'Habit, Event, …) with horizon/status/salience metadata. Call list_taxonomy to see what ' +
-  'exists, search_context to find documents, then get_document for full content.';
+  'exists, search_context to find documents, then get_document for full content. ' +
+  'The same taxonomy also exists as an OWL ontology (RDF/XML in S3, /visual-ontologies ' +
+  'dashboard): ontology_search retrieves typed nodes+edges, ontology_update edits the graph, ' +
+  'and ontology_sync routes new vault content into it — answer its pending questions by ' +
+  'calling it again with `guidance`.';
 
 interface TextResult {
   [key: string]: unknown;
@@ -121,6 +127,120 @@ export function buildServer(): McpServer {
         return jsonResult(listTaxonomy(getConnections().enrichedCorpus.get()));
       } catch (error) {
         return errorResult('Failed to list taxonomy', error);
+      }
+    },
+  );
+
+  const nodeInputSchema = z.object({
+    id: z.string().describe('Node id: lowercase slug (a-z, 0-9, hyphens); reuse to enrich'),
+    class: z.string().describe('Ontology class, e.g. Project, Person, Goal'),
+    label: z.string().optional().describe('Human-readable name'),
+    attributes: z
+      .record(
+        z.string(),
+        z.union([z.string(), z.number(), z.array(z.union([z.string(), z.number()]))]),
+      )
+      .optional()
+      .describe('Datatype properties, e.g. {"summary": "...", "status": "active"}'),
+  });
+  const edgeInputSchema = z.object({
+    subject: z.string(),
+    predicate: z.string().describe('Object property, e.g. contributesTo, involvesPerson'),
+    object: z.string(),
+  });
+
+  server.registerTool(
+    'ontology_search',
+    {
+      title: 'Search the ontology',
+      description:
+        'Retrieval over the personal-context OWL ontology (the graph the injector builds from ' +
+        'the vault). Ranks nodes by embedding similarity (keyword fallback), then expands the ' +
+        'neighborhood: returns matched nodes with attributes and created/modified timestamps, ' +
+        'plus surrounding edges and neighbor nodes. Params: classes (filter matches), limit ' +
+        '(default 10), hops (neighbor expansion 0-2, default 1).',
+      inputSchema: {
+        query: z.string().describe('Natural-language query'),
+        classes: z
+          .array(z.string())
+          .optional()
+          .describe('Restrict matches to these classes, e.g. ["Project", "Goal"]'),
+        limit: z.number().int().min(1).max(25).optional(),
+        hops: z.number().int().min(0).max(2).optional(),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async args => {
+      try {
+        const { ontologyStore, openRouter } = getConnections();
+        return jsonResult(await ontologySearch(ontologyStore.get(), openRouter.maybe(), args));
+      } catch (error) {
+        return errorResult('Ontology search failed', error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'ontology_update',
+    {
+      title: 'Update the ontology',
+      description:
+        'Validated write into the ontology registry: upsert nodes (with attributes), add ' +
+        'edges, set single attributes, or remove nodes/edges. The whole batch is checked ' +
+        'against the OWL schema (classes, property domains/ranges, cardinalities) and applied ' +
+        'all-or-nothing; success persists a new immutable RDF version to S3.',
+      inputSchema: {
+        nodes: z.array(nodeInputSchema).optional(),
+        edges: z.array(edgeInputSchema).optional(),
+        attributes: z
+          .array(z.object({ nodeId: z.string(), property: z.string(), value: z.union([z.string(), z.number()]) }))
+          .optional()
+          .describe('Single-attribute upserts on existing nodes'),
+        removeNodes: z.array(z.string()).optional(),
+        removeEdges: z.array(edgeInputSchema).optional(),
+      },
+    },
+    async args => {
+      try {
+        const { ontologyStore, openRouter } = getConnections();
+        return jsonResult(await ontologyUpdate(ontologyStore.get(), openRouter.maybe(), args));
+      } catch (error) {
+        return errorResult('Ontology update failed', error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'ontology_sync',
+    {
+      title: 'Sync vault content into the ontology',
+      description:
+        'Runs the injector now (the same job the hourly cron runs): routes new/changed ' +
+        'enriched vault documents into the ontology via an LLM discovery loop (max 5 ' +
+        'iterations per document). Documents the loop cannot place land in pending_guidance ' +
+        'with a question — the elicitation mechanism. Answer by calling this tool again with ' +
+        'guidance: [{path, instruction}]. force=true re-routes everything.',
+      inputSchema: {
+        guidance: z
+          .array(z.object({ path: z.string(), instruction: z.string() }))
+          .optional()
+          .describe('Answers to pending_guidance questions, keyed by document path'),
+        force: z.boolean().optional().describe('Re-route all documents, ignoring processed hashes'),
+      },
+    },
+    async args => {
+      try {
+        const guidance = Object.fromEntries(
+          (args.guidance ?? []).map(g => [g.path, g.instruction]),
+        );
+        return jsonResult(
+          await runSync({
+            guidance: Object.keys(guidance).length ? guidance : undefined,
+            force: args.force,
+          }),
+        );
+      } catch (error) {
+        return errorResult('Ontology sync failed', error);
       }
     },
   );
