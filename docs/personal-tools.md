@@ -280,22 +280,65 @@ Same pattern as `OPENROUTER_API_KEY` — plain env vars through `node-config`
 |---|---|---|
 | `YNAB_TOKEN` | https://app.ynab.com/settings/developer (personal access token) | SSM `/personal-context/ynab-token` |
 | `HEVY_API_KEY` | https://hevy.com/settings?developer (requires Hevy Pro) | SSM `/personal-context/hevy-api-key` |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | `client_id`/`client_secret` inside `my-mcp-platform/credentials/google_oauth_client.json` (an OAuth "Desktop app" client from Google Cloud Console) — reused as-is, same client already used for Sheets | SSM `/personal-context/google-client-id`, `/personal-context/google-client-secret` |
-| `GOOGLE_CALENDAR_REFRESH_TOKEN` | **Needs a fresh consent** — `my-mcp-platform`'s existing `credentials/google_token.json` only carries the `spreadsheets`/`drive.file` scopes (Sheets), not `calendar`, so it can't be reused. Mint one with `uv run python servers/gcalendar/setup_oauth.py` in `my-mcp-platform` (one-time interactive browser flow), then read `refresh_token` out of the resulting `credentials/google_calendar_token.json` | SSM `/personal-context/google-calendar-refresh-token` |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | `client_id`/`client_secret` fields inside an OAuth "Desktop app" client downloaded from Google Cloud Console (Calendar API enabled). Read the two fields out of the JSON, then the file itself can be discarded — nothing here depends on it persisting anywhere | SSM `/personal-context/google-client-id`, `/personal-context/google-client-secret` |
+| `GOOGLE_CALENDAR_REFRESH_TOKEN` | Mint one with `GOOGLE_CLIENT_ID=… GOOGLE_CLIENT_SECRET=… npx tsx scripts/setup-gcal-oauth.ts` in **this repo** (one-time interactive browser flow: opens the consent screen, catches the redirect on a local loopback server, exchanges the code for tokens) — prints `refresh_token` to the terminal, nothing written to disk | SSM `/personal-context/google-calendar-refresh-token` |
 
 Empty value on any of the three ⇒ the connection reports "not configured" on
 `/ready` and `gcal_*` tools return an `isError` result with a clear message —
-the server still boots, and the rest of the host is unaffected. Locally,
-`YNAB_TOKEN`/`HEVY_API_KEY` can be copied from `my-mcp-platform/.env`;
-`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are copied from the client-secrets
-JSON above; `GOOGLE_CALENDAR_REFRESH_TOKEN` requires the browser flow (never
-commit any of these — they're secrets, same tier as an API key).
+the server still boots, and the rest of the host is unaffected. `YNAB_TOKEN`
+and `HEVY_API_KEY` come straight from their dashboards (links above); Google's
+three values come from `scripts/setup-gcal-oauth.ts` as described (never
+commit any of these — they're secrets, same tier as an API key). The old
+`my-mcp-platform` repo (originally the source of these tools, and previously
+also of the OAuth-minting flow) is deprecated — nothing in this MCP depends on
+it anymore.
+
+### The OAuth consent screen must be "In production" (not "Testing")
+
+The single most important gotcha when re-minting the Calendar refresh token.
+While the Cloud Console project's OAuth consent screen sits in **Testing**
+status, Google hard-expires every refresh token **7 days after consent**, no
+matter how actively it is used — `gcal_*` silently dies a week after each
+setup. Clicking **Publish app** (the button is labelled "Publish app"; the
+confirmation dialog calls it pushing to production) removes that expiry.
+
+Publishing does **not** require passing Google's verification review, despite
+what the dialog implies:
+
+- Publishing is not gated on verification — an unverified app publishes fine.
+- The only costs are a "Google hasn't verified this app" interstitial during
+  consent (click **Advanced → Go to \<app\> (unsafe)**) and a lifetime cap of
+  100 consenting accounts. With one user, neither matters.
+- "In production" does not list or expose the app publicly.
+- **Publish before minting.** A token issued while still in Testing keeps its
+  7-day expiry even if the status is flipped afterwards.
+
+Mint order therefore: publish the app → run `scripts/setup-gcal-oauth.ts` →
+`put-parameter` the three values → `deploy/deploy.sh`.
+
+### Getting the values to production
 
 The five SSM `SecureString` placeholders and the `deploy.sh`/`docker-compose.yml`
 plumbing already exist in `personal-infra/context` (Terraform `main.tf`,
-`deploy/deploy.sh`, `deploy/docker-compose.yml`) — real values still need to
-be `put-parameter`'d and `terraform apply` run once (see that repo; per its
-`CLAUDE.md` these are human-run commands, not run unilaterally by an agent).
+`deploy/deploy.sh`, `deploy/docker-compose.yml`); Terraform creates them with
+the literal value `PLACEHOLDER` under `ignore_changes = [value]`, so writing a
+real value is a plain `put-parameter --overwrite` and needs **no**
+`terraform apply`:
+
+```bash
+aws ssm put-parameter --profile personal --region us-east-1 --type SecureString --overwrite \
+  --name /personal-context/google-calendar-refresh-token --value "<token>"
+```
+
+`deploy.sh` treats a still-`PLACEHOLDER` value as empty and prints
+`(google-* still PLACEHOLDER -> gcal_* tools disabled)` — that line is the
+fastest way to tell a missing `put-parameter` from a deploy problem.
+
+Because the container reads plain env vars rendered into `.env` at deploy time,
+**an SSM write alone changes nothing on the droplet** — `deploy/deploy.sh` has
+to re-render and restart it. Per `personal-infra`'s `CLAUDE.md`, that script is
+human-run (it SSHes into the shared production droplet), as is
+`terraform apply`.
 
 ## Architecture
 
@@ -349,7 +392,10 @@ claude mcp add --transport http personal-tools http://localhost:3000/personal-to
   an ambiguous exercise name was refused with candidates. **No live write has
   been executed** — the create/update paths are verified only through `dry_run`
   and unit tests, because Hevy has no DELETE to undo a test record with.
-- Calendar tools (`gcal_*`) are implemented and unit-tested but **not yet
-  smoke-tested against a real Google account** — `GOOGLE_CALENDAR_REFRESH_TOKEN`
-  needs to be minted (see Secrets above) before `tools/list`/live calls can be
-  verified end-to-end.
+- Calendar auth, verified live 2026-08-23: a refresh token minted via
+  `scripts/setup-gcal-oauth.ts` (consent screen published to production first)
+  exchanged successfully for an access token against
+  `oauth2.googleapis.com/token`, and `calendarList` returned the real primary
+  calendar. That exercised the same refresh-grant path `google-calendar.ts`
+  uses, but by direct REST from the laptop — the `gcal_*` **tools** themselves
+  are still unit-tested only, not yet driven through the deployed MCP.
