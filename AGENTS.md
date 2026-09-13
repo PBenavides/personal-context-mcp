@@ -91,6 +91,7 @@ the shared production droplet. Surface the exact command for a human to run
 rather than working around a denial. `make release`, SSM reads, `terraform plan`
 and laptop-side batch runs are fine to run directly.
 
-Tools that write to a third-party account (`hevy_write_*`, `ynab_create_transaction`,
-`gcal_create_event`) affect real records. Several of those APIs have no delete.
-Prefer `dry_run` where a tool offers it, and confirm before committing a write.
+Tools that write to a third-party account (`hevy_write_routine`, `ynab_assign`,
+`ynab_write_transaction`, `ynab_write_category`, `gcal_create_event`) affect real
+records. Several of those APIs have no delete. Prefer `dry_run` where a tool
+offers it, and confirm before committing a write.

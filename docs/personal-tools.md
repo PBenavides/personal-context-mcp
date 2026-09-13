@@ -21,7 +21,7 @@ no Python-specific SDKs:
 
 | Integration | Auth | Portable to JS? | Status |
 |---|---|---|---|
-| YNAB | Static bearer token (`YNAB_TOKEN`) | ✅ trivially — plain REST | **Ported** (8 tools) |
+| YNAB | Static bearer token (`YNAB_TOKEN`) | ✅ trivially — plain REST | **Reshaped Sept 2026** (8 tools: 5 reads, 3 writes) |
 | Hevy | Static API key (`api-key` header, `HEVY_API_KEY`) | ✅ trivially — plain REST | **Ported** (7 tools: 1 aggregation, 3 reads, 3 writes) |
 | Google Calendar | Google OAuth refresh token + client id/secret | ✅ ported — plain REST + one refresh-token exchange | **Ported** (7 tools) |
 | Google Sheets | Same Google OAuth token flow | ✅ possible, needs token plumbing | **Skipped** (see below) |
@@ -46,36 +46,60 @@ that is plain authenticated REST).
 
 Design goal: fewer, intent-level tools instead of the 17-tool 1:1 YNAB mapping
 — filters became parameters, single-get folded into list tools, and the three
-report tools merged behind a `kind` enum. Handlers live in
+report tools merged behind a `kind` enum. The September 2026 YNAB reshape went
+further: reads are pre-shaped for the questions a scheduled/hook agent asks,
+and the write surface centres on assigning money, not logging transactions. Handlers live in
 `src/mcps/personal-tools/tools.ts` (unit-tested against fake clients);
 registration in `src/mcps/personal-tools/index.ts`.
 
 ### YNAB (`ynab_*`)
 
-All tools default to the **last-used budget**; pass `budget_id` to override.
-Raw endpoints return YNAB **milliunits** (1000 = one currency unit);
-`ynab_report` converts to currency units.
+Reshaped 2026-09-13 for agents that run scheduled or on a hook (transaction
+triage, weekly savings steering) and for the **one-month-ahead method** —
+income received this month is assigned into next month's categories until
+Ready to Assign is 0. Design record:
+`docs/feat_requirements/YNAB_TOOLS_REFORMAT_SEP_13TH.md`. Conventions, enforced
+by the pure `ynab-payloads.ts` module:
+
+- **Currency units everywhere.** Reads divide milliunits by 1000; writes accept
+  `250.5`, `"$250.50"`, or `"250,50 EUR"` and convert internally. Outflows are
+  negative. Milliunits never reach the caller.
+- **Names are first-class ids**: `category` / `account` / `payee` params take a
+  name or a uuid; ambiguous names are refused with the candidates listed.
+- **Months** accept `current` (default), `next`, `YYYY-MM`, or `YYYY-MM-01` —
+  `next` is the one-month-ahead target.
+- All tools default to the **last-used budget**. Endpoints use YNAB's
+  `/plans/…` paths (the API's v1.79.0 rename of budgets); the `budget_id`
+  param keeps the familiar name.
 
 | Tool | Parameters | Purpose |
 |---|---|---|
-| `ynab_budgets` | `budget_id?` | List budgets, or one budget in full detail. Only needed for budget discovery. |
-| `ynab_accounts` | `budget_id?`, `account_id?` | Accounts with balances, or one account. |
-| `ynab_transactions` | `budget_id?`, `transaction_id?`, `account_id?`, `category_id?`, `payee_id?`, `since_date?`, `type?`, `verbose?` | One query tool for all transaction access. Scope precedence: transaction > account > category > payee > whole budget (`since_date` then required). Compact view by default; `verbose=true` for full objects. |
-| `ynab_create_transaction` | `account_id`, `date`, `amount` (milliunits, negative = outflow), `budget_id?`, `payee_name?`, `category_id?`, `memo?` | The only write tool. |
-| `ynab_categories` | `budget_id?`, `category_id?`, `month?` | Category groups, or one category month-scoped with goal progress. |
-| `ynab_payees` | `budget_id?` | All payees. |
-| `ynab_scheduled` | `budget_id?` | Scheduled (recurring) transactions. |
-| `ynab_report` | `kind` (`net_worth` \| `monthly_summary` \| `full`), `budget_id?`, `month?`, `months_back?` | Aggregated reports in currency units — the `reports.py` port. |
+| `ynab_overview` | `budget_id?`, `month?` | **The first call for budget health.** Ready to Assign for this and next month (once assigned ahead, the future-most month is authoritative), age of money, month totals, next month's funding progress vs targets, overspent categories, bills due within 30 days, derived alerts. 3 parallel GETs. |
+| `ynab_transactions` | `budget_id?`, `transaction_id?`, `account?`, `category?`, `payee?`, `since_date?`, `until_date?`, `type?`, `limit?` (30), `verbose?` | One query tool for all transaction access, newest first. Scope precedence: transaction > account > category > payee > whole budget (`since_date` then required). |
+| `ynab_categories` | `budget_id?`, `category?`, `month?`, `include_hidden?` | Grouped compact list (assigned/activity/available + target progress), or one category's full target detail. |
+| `ynab_report` | `kind` (`net_worth` \| `monthly_summary` \| `full`), `budget_id?`, `month?`, `months_back?` | Aggregated reports. |
+| `ynab_lookup` | `entity` (`budgets` \| `accounts` \| `payees` \| `scheduled`), `budget_id?`, `id?`, `include_closed?` | Compact utility listings — the ids and names the other tools consume. |
+| `ynab_assign` | `assignments[]` (each `category` + exactly one of `set` \| `adjust`), `month?`, `budget_id?`, `dry_run?` | **The budgeting write.** Set/adjust assigned amounts for a month in one call; a move is one category down + another up together; `month: "next"` is the month-ahead move. |
+| `ynab_write_transaction` | `transaction_id?`, `delete?`, `scheduled?`, `account?`, `date?`, `amount?`, `payee?`, `category?`, `memo?`, `cleared?`, `approved?`, `flag_color?`, `import_id?`, `frequency?`, `splits?`, `budget_id?`, `dry_run?` | Create/update/delete; the id decides the verb. A `frequency` or future date routes to the scheduled-transaction endpoints. |
+| `ynab_write_category` | `category?`, `name?`, `group?`, `note?`, `target_amount?`, `target_date?`, `target_frequency?`, `remove_target?`, `new_group?`, `rename_group_to?`, `budget_id?`, `dry_run?` | The "priorities changed" write: create/rename/move categories, manage targets, create/rename groups. |
 
-Mapping from the Python surface: `ynab_get_budget`→`ynab_budgets(budget_id)`;
-`ynab_get_account`→`ynab_accounts(account_id)`; `ynab_get_transaction` /
-`ynab_transactions_by_account` / `ynab_transactions_by_category` →
-`ynab_transactions(...)`; `ynab_get_category_by_month`→
-`ynab_categories(category_id, month)`; `ynab_net_worth` /
-`ynab_monthly_summary` / `ynab_financial_report` → `ynab_report(kind=…)`.
-Dropped: `ynab_get_user` (no agent value; connection health is reported on
-`/ready`). The Python server's MCP *resources* and *prompts* were not ported —
-this host is tools-only for now.
+#### Writing
+
+Every write takes `dry_run`, and it runs the **entire** build path — name
+resolution, amount parsing, validation — short-circuiting only the mutating
+call, so the returned method/endpoint/payload is a real rehearsal and the
+proposal artifact an agent hands a human before committing. `ynab_assign`
+additionally previews before→after per category and the projected Ready to
+Assign. API impossibilities are refused with the reason named, never hidden:
+no deleting categories/accounts/payees, no editing splits after creation
+(delete + recreate), no split scheduled transactions, no creating whole
+budgets.
+
+Mapping from the previous (2026-07) surface: `ynab_budgets` / `ynab_accounts`
+/ `ynab_payees` / `ynab_scheduled` → `ynab_lookup(entity=…)`;
+`ynab_create_transaction` → `ynab_write_transaction`. New: `ynab_overview`,
+`ynab_assign`, `ynab_write_category`. The Python-surface mapping recorded in
+earlier versions of this doc is now two generations back — see git history.
 
 ### Hevy (`hevy_*`)
 
@@ -90,9 +114,7 @@ session that happened, a **routine** is a reusable plan.
 | `hevy_body_measurements` | `date?`, `days?`, `limit?` (10) | Logged measurements, newest first. Nulls omitted. |
 | `hevy_calculate_burnt_calories` | `workout_id`, `weight_kg?`, `fat_percent?`, `lean_mass_kg?` | Estimated energy cost of one workout. Rough — see below. |
 | `hevy_routines` | `routine_id?` | All routines, or one. |
-| `hevy_write_workout` | `workout_id?`, `title?`, `start_time?`, `end_time?`, `exercises?`, `description?`, `is_private?`, `exercise_mode?`, `dry_run?` | Log a session; updates when `workout_id` is passed. |
 | `hevy_write_routine` | `routine_id?`, `title?`, `exercises?`, `notes?`, `folder_name?`, `create_folder?`, `exercise_mode?`, `dry_run?` | Create a plan; updates when `routine_id` is passed. |
-| `hevy_create_custom_exercise` | `title`, `exercise_type`, `equipment_category`, `muscle_group`, `other_muscles?`, `dry_run?` | Custom template when no stock exercise fits. |
 
 Create and update are one tool per entity rather than two, consistent with how
 the YNAB surface was consolidated: the presence of an id decides the verb.
@@ -185,7 +207,7 @@ the breakdown is keyed **by muscle group and then by day**:
   breakdown is filtered to: they answer "how much did I train", while
   `muscle_groups` answers "what did I train".
 - `workout_id` is exposed here and nowhere else — it is what `hevy_get_workout`
-  and `hevy_write_workout` need.
+  and `hevy_calculate_burnt_calories` need.
 
 Both this and `hevy_search_exercise_catalog` paginate `/v1/workouts` newest-first
 (pages of 10), stopping at the first workout older than the window, and load all
@@ -342,7 +364,10 @@ claude mcp add --transport http personal-tools http://localhost:3000/personal-to
   per-muscle ordering; unconfigured runs return clean `isError` results. That
   smoke predates the 2026-08-06 read-tool reshape (two aggregations merged into
   `hevy_recent_activity`, `hevy_search_exercises` →
-  `hevy_search_exercise_catalog`), which is covered by unit tests only so far.
+  `hevy_search_exercise_catalog`), which is covered by unit tests only so far. The 2026-09-13 YNAB reshape
+  (8 reshaped tools, `/plans/…` endpoints, currency-unit amounts, writes with
+  `dry_run`) is likewise unit-tested only — re-smoke against the real API
+  before relying on it in production.
 - Hevy writes, live dry-run against the real account (2026-08-06): renaming a
   7-exercise / 28-set routine preserved all 7 and 28 with `folder_id` correctly
   absent and no read-shape keys leaking; `exercise_mode: "append"` produced 8;

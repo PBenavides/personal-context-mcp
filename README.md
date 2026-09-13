@@ -33,12 +33,14 @@ connection layer) is documented in [docs/](docs/).
 
 ## Tools (MCP `personal-tools`, mounted at `/personal-tools`)
 
-The action layer, ported from the Python `my-mcp-platform` server: 8 `ynab_*`
-tools (budgets, accounts, unified transaction queries, categories, payees,
-scheduled, one write, aggregated reports) and 8 `hevy_*` tools (workout
-analytics, exercise search, plus creating and updating workouts and routines —
-`hevy_write_*` create when given no id and update when given one, and take
-`dry_run` to preview the request body). Requires `YNAB_TOKEN` / `HEVY_API_KEY`;
+The action layer: 8 `ynab_*` tools reshaped (2026-09) around the
+one-month-ahead budgeting method — a budget-health overview, transaction /
+category / report reads, an entity lookup, and writes that assign money to
+categories, manage transactions, and reshape categories; everything speaks
+currency units (writes accept "$250.50"-style amounts) and every write takes
+`dry_run` — plus 7 `hevy_*` tools (workout analytics, exercise search, and
+`hevy_write_routine`, which creates when given no id and updates when given
+one, with `dry_run`). Requires `YNAB_TOKEN` / `HEVY_API_KEY`;
 unset keys disable the corresponding tools cleanly. Full surface, design
 rationale, and the Google-integrations status:
 [docs/personal-tools.md](docs/personal-tools.md).
