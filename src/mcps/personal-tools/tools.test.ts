@@ -37,7 +37,11 @@ function fakeYnab(responses: Record<string, unknown> = {}): YnabClient & {
   const calls: { method: string; endpoint: string; params?: unknown; body?: unknown }[] = [];
   const lookup = (endpoint: string, fallback?: unknown): unknown => {
     if (endpoint in responses) {
-      return responses[endpoint];
+      const canned = responses[endpoint];
+      if (canned instanceof Error) {
+        throw canned; // lets tests drive the 404/500 paths
+      }
+      return canned;
     }
     if (fallback !== undefined) {
       return fallback;
@@ -302,14 +306,35 @@ describe('ynabOverview', () => {
     expect((result.alerts as string[]).length).toBeGreaterThan(0);
   });
 
-  it('degrades when the following month is not materialized yet', async () => {
+  it('reports an unopened next month and falls back to this month for RTA alerts', async () => {
+    const nextMonth = followingMonth(monthIso(undefined));
     const client = fakeYnab({
-      '/plans/last-used/months/current': monthResponse('2026-09-01'),
+      '/plans/last-used/months/current': monthResponse('2026-09-01', {
+        to_be_budgeted: -34710,
+      }),
+      // the next month 404s, as YNAB does until something is assigned into it
+      [`/plans/last-used/months/${nextMonth}`]: new Error(
+        `YNAB GET /plans/last-used/months/${nextMonth} failed: 404 resource_not_found`,
+      ),
     });
     const result = (await ynabOverview(client, {})) as Record<string, unknown>;
     expect(result.month).toBe('2026-09');
-    expect(result.month_ahead).toBeUndefined();
-    expect(result.ready_to_assign).toEqual({ this_month: 0 });
+    expect(result.month_ahead).toEqual({ month: nextMonth.slice(0, 7), open_in_ynab: false });
+    expect(result.ready_to_assign).toEqual({ this_month: -34.71 });
+    const alerts = result.alerts as string[];
+    expect(alerts.some(alert => /over-assigned by 34\.71/.test(alert))).toBe(true);
+    expect(alerts.some(alert => /not open in YNAB yet/.test(alert))).toBe(true);
+  });
+
+  it('propagates non-404 failures on the following month instead of hiding them', async () => {
+    const nextMonth = followingMonth(monthIso(undefined));
+    const client = fakeYnab({
+      '/plans/last-used/months/current': monthResponse('2026-09-01'),
+      [`/plans/last-used/months/${nextMonth}`]: new Error(
+        `YNAB GET /plans/last-used/months/${nextMonth} failed: 500 server_error`,
+      ),
+    });
+    await expect(ynabOverview(client, {})).rejects.toThrow(/500/);
   });
 });
 
@@ -445,6 +470,20 @@ describe('ynabCategories', () => {
   });
 });
 
+describe('ynabCategories on an unopened month', () => {
+  it('explains that the month is not open rather than surfacing a 404', async () => {
+    const client = fakeYnab({
+      '/plans/last-used/months/2026-12-01': new Error(
+        'YNAB GET /plans/last-used/months/2026-12-01 failed: 404 resource_not_found',
+      ),
+      '/plans/last-used/categories': CATEGORY_GROUPS,
+    });
+    await expect(ynabCategories(client, { month: '2026-12' })).rejects.toThrow(
+      /2026-12 is not open in YNAB yet/,
+    );
+  });
+});
+
 describe('ynabLookup', () => {
   it('lists budgets compactly', async () => {
     const client = fakeYnab({
@@ -539,6 +578,38 @@ describe('ynabAssign', () => {
     await expect(
       ynabAssign(client, { assignments: [{ category: 'o', set: 1 }] }),
     ).rejects.toThrow(/ambiguous.*Groceries.*Dining Out/s);
+    expect(client.calls.some(call => call.method === 'PATCH')).toBe(false);
+  });
+
+  it('assigns into an unopened month, resolving names from the category list', async () => {
+    const nextMonth = followingMonth(monthIso(undefined));
+    const client = fakeYnab({
+      [`/plans/last-used/months/${nextMonth}`]: new Error(
+        `YNAB GET /plans/last-used/months/${nextMonth} failed: 404 resource_not_found`,
+      ),
+      '/plans/last-used/categories': CATEGORY_GROUPS,
+    });
+    const result = (await ynabAssign(client, {
+      month: 'next',
+      assignments: [{ category: 'Groceries', set: '$400' }],
+    })) as Record<string, unknown>;
+    expect(result.creates_month).toBe(true);
+    expect(result.changes).toEqual([{ category: 'Groceries', before: 0, after: 400 }]);
+    const patch = client.calls.find(call => call.method === 'PATCH');
+    expect(patch?.endpoint).toBe(`/plans/last-used/months/${nextMonth}/categories/c1`);
+    expect(patch?.body).toEqual({ category: { budgeted: 400000 } });
+  });
+
+  it('refuses adjust on an unopened month, naming set as the fix', async () => {
+    const nextMonth = followingMonth(monthIso(undefined));
+    const client = fakeYnab({
+      [`/plans/last-used/months/${nextMonth}`]: new Error(
+        `YNAB GET /plans/last-used/months/${nextMonth} failed: 404 resource_not_found`,
+      ),
+    });
+    await expect(
+      ynabAssign(client, { month: 'next', assignments: [{ category: 'Groceries', adjust: 50 }] }),
+    ).rejects.toThrow(/nothing to adjust.*use set/s);
     expect(client.calls.some(call => call.method === 'PATCH')).toBe(false);
   });
 

@@ -652,6 +652,11 @@ export interface OverviewInput {
   month: Json;
   /** Raw month detail for the month after it, when available. */
   following?: Json;
+  /**
+   * The following month exists in the calendar but not yet in YNAB (404): months
+   * materialize only once something is assigned or scheduled into them.
+   */
+  followingIso?: string;
   /** Raw scheduled transactions (for the upcoming-bills window). */
   scheduled?: unknown;
   today?: Date;
@@ -726,6 +731,23 @@ export function shapeOverview(input: OverviewInput): Json {
     if (underfundedTotal > 0) {
       alerts.push(`next month needs ${underfundedTotal} more to be fully funded`);
     }
+  } else {
+    // No following month: this month's Ready to Assign is the authoritative one,
+    // so the over-assigned / idle-money alerts have to come from it instead.
+    const rta = toCurrency(month.to_be_budgeted);
+    if (rta < 0) {
+      alerts.push(
+        `this month is over-assigned by ${round3(-rta)} — reduce an assignment until Ready to Assign is back to 0`,
+      );
+    } else if (rta > 0) {
+      alerts.push(`${round3(rta)} is ready to assign`);
+    }
+    if (input.followingIso) {
+      alerts.push(
+        `next month (${input.followingIso.slice(0, 7)}) is not open in YNAB yet — assigning to it ` +
+          'creates it (ynab_assign with month: "next" and set amounts)',
+      );
+    }
   }
 
   const today = input.today ?? new Date();
@@ -752,6 +774,9 @@ export function shapeOverview(input: OverviewInput): Json {
           }
         : {}),
     },
+    ...(!following && input.followingIso
+      ? { month_ahead: { month: input.followingIso.slice(0, 7), open_in_ynab: false } }
+      : {}),
     age_of_money: typeof month.age_of_money === 'number' ? month.age_of_money : null,
     income: round3(toCurrency(month.income)),
     assigned: round3(toCurrency(month.budgeted)),

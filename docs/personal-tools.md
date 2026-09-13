@@ -71,6 +71,14 @@ by the pure `ynab-payloads.ts` module:
 - All tools default to the **last-used budget**. Endpoints use YNAB's
   `/plans/…` paths (the API's v1.79.0 rename of budgets); the `budget_id`
   param keeps the familiar name.
+- **A future month may not exist yet.** YNAB materializes a month only once
+  something is assigned or scheduled into it, and 404s it until then — routine
+  for `month: "next"`. `ynab_overview` reports it as
+  `month_ahead: {open_in_ynab: false}` and falls back to this month's Ready to
+  Assign for its alerts; `ynab_assign` resolves names from the budget-wide
+  category list and assigns anyway (that is what creates the month), refusing
+  only `adjust`, which has nothing to adjust; `ynab_categories` says so instead
+  of leaking the HTTP error.
 
 | Tool | Parameters | Purpose |
 |---|---|---|
