@@ -5,6 +5,12 @@ import type { McpDefinition } from '../../registry/types.js';
 import { getAppVersion } from '../../version.js';
 import { MUSCLE_GROUPS } from './hevy-payloads.js';
 import {
+  CLEARED_STATES,
+  FLAG_COLORS,
+  FREQUENCIES,
+  TARGET_FREQUENCIES,
+} from './ynab-payloads.js';
+import {
   ACTIVITY_TYPES,
   gcalCreateEvent,
   gcalDeleteEvent,
@@ -20,14 +26,14 @@ import {
   hevyRoutines,
   hevySearchExerciseCatalog,
   hevyWriteRoutine,
-  ynabAccounts,
-  ynabBudgets,
+  ynabAssign,
   ynabCategories,
-  ynabCreateTransaction,
-  ynabPayees,
+  ynabLookup,
+  ynabOverview,
   ynabReport,
-  ynabScheduled,
   ynabTransactions,
+  ynabWriteCategory,
+  ynabWriteTransaction,
 } from './tools.js';
 
 const NAME = 'personal-tools';
@@ -35,15 +41,24 @@ const NAME = 'personal-tools';
 const VERSION = getAppVersion();
 
 const INSTRUCTIONS =
-  "Action layer over Pablo's personal accounts, ported from the my-mcp-platform Python " +
-  'server. Three integrations: YNAB budgeting (ynab_* — budgets, accounts, transactions, ' +
-  'categories, payees, scheduled transactions, aggregated reports), Hevy workout tracking ' +
+  "Action layer over Pablo's personal accounts. Three integrations: YNAB budgeting " +
+  '(ynab_* — a budget-health overview, transaction queries, categories with targets, ' +
+  'reports, lookups, and writes that assign money, manage transactions, and reshape ' +
+  'categories), Hevy workout tracking ' +
   '(hevy_* — recent training by muscle group and day, logged workouts, routines, body ' +
   'measurements, a calorie estimate, and exercise-catalog search), and Google Calendar (gcal_* — list ' +
-  'calendars/events, get/create/update/delete an event, free/busy lookup). Raw YNAB amounts ' +
-  'are in milliunits (1000 = one currency unit); ynab_report already converts to currency ' +
-  'units. Most ynab_* tools default to the last-used budget — call ynab_budgets only when ' +
-  'another budget is needed. gcal_* tools default to the "primary" calendar. Hevy is read-only ' +
+  'calendars/events, get/create/update/delete an event, free/busy lookup). The budget runs ' +
+  "the one-month-ahead method: income received this month is assigned into next month's " +
+  'categories (ynab_assign with month: "next") until Ready to Assign is 0. Start any ' +
+  'budget-health question at ynab_overview. All ynab_* amounts are currency units, never ' +
+  'milliunits; writes accept strings like "$250.50" or "250,50 EUR", and outflows are ' +
+  'negative. Categories, accounts, and payees go by name or id — ambiguous names are ' +
+  'refused with the candidates listed. Tools default to the last-used budget (ynab_lookup ' +
+  'entity: "budgets" lists the rest). The YNAB writes (ynab_assign, ' +
+  'ynab_write_transaction, ynab_write_category) all take dry_run to preview the exact ' +
+  'request — prefer it before committing; the API cannot delete categories, accounts, or ' +
+  'payees, and cannot create whole budgets. gcal_* tools default to the "primary" ' +
+  'calendar. Hevy is read-only ' +
   'except for hevy_write_routine, which creates a reusable plan when no routine_id is passed ' +
   'and updates one when it is, preserving any field you omit; exercises there are addressed by ' +
   'exercise_template_id, so call hevy_search_exercise_catalog first (or pass a name and let it ' +
@@ -76,7 +91,7 @@ function errorResult(prefix: string, error: unknown): TextResult {
 const budgetId = z
   .string()
   .optional()
-  .describe('Budget to query; defaults to the last-used budget');
+  .describe('Budget; defaults to the last-used budget');
 
 /**
  * Builds a fresh personal-tools MCP server. Handlers live in `./tools.js` (unit-tested with
@@ -90,51 +105,44 @@ export function buildServer(): McpServer {
     { instructions: INSTRUCTIONS },
   );
 
-  server.registerTool(
-    'ynab_budgets',
-    {
-      title: 'List YNAB budgets',
-      description:
-        'List all budgets (id, name, last modified), or pass budget_id for one budget in full ' +
-        'detail. Only needed to discover budget ids — every other ynab_* tool defaults to the ' +
-        'last-used budget.',
-      inputSchema: { budget_id: z.string().optional().describe('One budget in full detail') },
-      annotations: { readOnlyHint: true },
-    },
-    async args => {
-      try {
-        return jsonResult(
-          await ynabBudgets(getConnections().ynab.get(), { budgetId: args.budget_id }),
-        );
-      } catch (error) {
-        return errorResult('YNAB budgets failed', error);
-      }
-    },
-  );
+  // Shared across the YNAB and Hevy write tools so their contracts cannot drift.
+  const dryRun = z
+    .boolean()
+    .optional()
+    .describe('Return the request body that would be sent, without sending it');
+  // Shared across the YNAB tools: month keywords and human-format amounts.
+  const ynabMonth = z
+    .string()
+    .optional()
+    .describe('"current" (default), "next", YYYY-MM, or YYYY-MM-01');
+  const ynabAmount = z
+    .union([z.number(), z.string()])
+    .describe('Currency units: 250.5, "$250.50", or "250,50 EUR"');
 
   server.registerTool(
-    'ynab_accounts',
+    'ynab_overview',
     {
-      title: 'List YNAB accounts',
+      title: 'YNAB budget health overview',
       description:
-        'List all accounts with balances (milliunits), or pass account_id for one account. ' +
-        'For net worth or currency-unit balances prefer ynab_report kind=net_worth.',
-      inputSchema: {
-        budget_id: budgetId,
-        account_id: z.string().optional().describe('One account instead of the full list'),
-      },
+        'The first call for any budget-health question. One shot: Ready to Assign for this ' +
+        'and next month (once money is assigned ahead, the future-most month holds the ' +
+        "authoritative number), age of money, income/assigned/activity, next month's " +
+        'funding progress against targets (underfunded categories and amounts), overspent ' +
+        'categories, scheduled bills due in the next 30 days, and derived alerts for ' +
+        'triage. Currency units.',
+      inputSchema: { budget_id: budgetId, month: ynabMonth },
       annotations: { readOnlyHint: true },
     },
     async args => {
       try {
         return jsonResult(
-          await ynabAccounts(getConnections().ynab.get(), {
+          await ynabOverview(getConnections().ynab.get(), {
             budgetId: args.budget_id,
-            accountId: args.account_id,
+            month: args.month,
           }),
         );
       } catch (error) {
-        return errorResult('YNAB accounts failed', error);
+        return errorResult('YNAB overview failed', error);
       }
     },
   );
@@ -144,25 +152,37 @@ export function buildServer(): McpServer {
     {
       title: 'Query YNAB transactions',
       description:
-        'Query transactions. Scope precedence: transaction_id (single) > account_id > ' +
-        'category_id > payee_id > whole budget (then since_date is required to bound the ' +
-        'result). Default compact view: date, amount (milliunits, negative = outflow), payee, ' +
-        'category, account, memo; verbose=true returns full objects with ids/subtransactions.',
+        'Query transactions, newest first. Scope precedence: transaction_id (single) > ' +
+        'account > category > payee > whole budget (then since_date is required to bound ' +
+        'the result). Scopes accept a name or id — an ambiguous name is refused with the ' +
+        'candidates listed. Compact view in currency units (negative = outflow); ' +
+        'verbose=true returns raw YNAB objects.',
       inputSchema: {
         budget_id: budgetId,
         transaction_id: z.string().optional().describe('Fetch exactly one transaction'),
-        account_id: z.string().optional().describe('Transactions of one account'),
-        category_id: z.string().optional().describe('Transactions of one category'),
-        payee_id: z.string().optional().describe('Transactions of one payee'),
+        account: z.string().optional().describe('Transactions of one account (name or id)'),
+        category: z.string().optional().describe('Transactions of one category (name or id)'),
+        payee: z.string().optional().describe('Transactions of one payee (name or id)'),
         since_date: z
           .string()
           .optional()
           .describe('YYYY-MM-DD; only transactions on/after this date'),
+        until_date: z
+          .string()
+          .optional()
+          .describe('YYYY-MM-DD; only transactions on/before this date'),
         type: z
           .enum(['uncategorized', 'unapproved'])
           .optional()
           .describe('Restrict to uncategorized or unapproved transactions'),
-        verbose: z.boolean().optional().describe('Full YNAB objects instead of the compact view'),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe('Max transactions returned (default 30, newest first)'),
+        verbose: z.boolean().optional().describe('Raw YNAB objects instead of the compact view'),
       },
       annotations: { readOnlyHint: true },
     },
@@ -172,11 +192,13 @@ export function buildServer(): McpServer {
           await ynabTransactions(getConnections().ynab.get(), {
             budgetId: args.budget_id,
             transactionId: args.transaction_id,
-            accountId: args.account_id,
-            categoryId: args.category_id,
-            payeeId: args.payee_id,
+            account: args.account,
+            category: args.category,
+            payee: args.payee,
             sinceDate: args.since_date,
+            untilDate: args.until_date,
             type: args.type,
+            limit: args.limit,
             verbose: args.verbose,
           }),
         );
@@ -187,52 +209,21 @@ export function buildServer(): McpServer {
   );
 
   server.registerTool(
-    'ynab_create_transaction',
-    {
-      title: 'Create YNAB transaction',
-      description:
-        'Create a transaction. amount is in milliunits (negative = outflow, e.g. -12340 = ' +
-        'spending 12.34); date is YYYY-MM-DD. Get account_id from ynab_accounts.',
-      inputSchema: {
-        budget_id: budgetId,
-        account_id: z.string().describe('Account the transaction belongs to'),
-        date: z.string().describe('Transaction date, YYYY-MM-DD'),
-        amount: z.number().int().describe('Milliunits; negative = outflow'),
-        payee_name: z.string().optional().describe('Payee display name'),
-        category_id: z.string().optional().describe('Category from ynab_categories'),
-        memo: z.string().optional(),
-      },
-    },
-    async args => {
-      try {
-        return jsonResult(
-          await ynabCreateTransaction(getConnections().ynab.get(), {
-            budgetId: args.budget_id,
-            accountId: args.account_id,
-            date: args.date,
-            amount: args.amount,
-            payeeName: args.payee_name,
-            categoryId: args.category_id,
-            memo: args.memo,
-          }),
-        );
-      } catch (error) {
-        return errorResult('YNAB create transaction failed', error);
-      }
-    },
-  );
-
-  server.registerTool(
     'ynab_categories',
     {
-      title: 'List YNAB categories',
+      title: 'YNAB categories and targets',
       description:
-        'List all category groups with their categories, or pass category_id (plus optional ' +
-        'month, "current" or YYYY-MM-01) for one category with its goal progress that month.',
+        'Grouped category list for a month — assigned, activity, available, and target ' +
+        'progress per category, hidden ones skipped unless include_hidden — or pass ' +
+        "category (name or id) for one category's full target detail. Currency units.",
       inputSchema: {
         budget_id: budgetId,
-        category_id: z.string().optional().describe('One category, month-scoped, with goals'),
-        month: z.string().optional().describe('"current" (default) or YYYY-MM-01'),
+        category: z.string().optional().describe('One category (name or id) in full detail'),
+        month: ynabMonth,
+        include_hidden: z
+          .boolean()
+          .optional()
+          .describe('Include hidden categories and housekeeping groups'),
       },
       annotations: { readOnlyHint: true },
     },
@@ -241,8 +232,9 @@ export function buildServer(): McpServer {
         return jsonResult(
           await ynabCategories(getConnections().ynab.get(), {
             budgetId: args.budget_id,
-            categoryId: args.category_id,
+            category: args.category,
             month: args.month,
+            includeHidden: args.include_hidden,
           }),
         );
       } catch (error) {
@@ -252,56 +244,18 @@ export function buildServer(): McpServer {
   );
 
   server.registerTool(
-    'ynab_payees',
-    {
-      title: 'List YNAB payees',
-      description: 'List all payees in a budget.',
-      inputSchema: { budget_id: budgetId },
-      annotations: { readOnlyHint: true },
-    },
-    async args => {
-      try {
-        return jsonResult(
-          await ynabPayees(getConnections().ynab.get(), { budgetId: args.budget_id }),
-        );
-      } catch (error) {
-        return errorResult('YNAB payees failed', error);
-      }
-    },
-  );
-
-  server.registerTool(
-    'ynab_scheduled',
-    {
-      title: 'List YNAB scheduled transactions',
-      description: 'List all scheduled (recurring) transactions in a budget.',
-      inputSchema: { budget_id: budgetId },
-      annotations: { readOnlyHint: true },
-    },
-    async args => {
-      try {
-        return jsonResult(
-          await ynabScheduled(getConnections().ynab.get(), { budgetId: args.budget_id }),
-        );
-      } catch (error) {
-        return errorResult('YNAB scheduled failed', error);
-      }
-    },
-  );
-
-  server.registerTool(
     'ynab_report',
     {
       title: 'YNAB financial report',
       description:
-        'Aggregated reports in currency units (not milliunits). kind=net_worth: assets, ' +
-        'liabilities, per-account breakdown. kind=monthly_summary: income, spending, savings ' +
-        'rate, top categories for a month ("current" or YYYY-MM-01). kind=full: net worth + ' +
-        'current month + cash-flow history over months_back (default 3) months.',
+        'Aggregated reports in currency units. kind=net_worth: assets, liabilities, ' +
+        'per-account breakdown. kind=monthly_summary: income, spending, savings rate, top ' +
+        'categories for a month. kind=full: net worth + current month + cash-flow history ' +
+        'over months_back (default 3) months.',
       inputSchema: {
         budget_id: budgetId,
         kind: z.enum(['net_worth', 'monthly_summary', 'full']),
-        month: z.string().optional().describe('For monthly_summary: "current" or YYYY-MM-01'),
+        month: ynabMonth,
         months_back: z
           .number()
           .int()
@@ -324,6 +278,238 @@ export function buildServer(): McpServer {
         );
       } catch (error) {
         return errorResult('YNAB report failed', error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'ynab_lookup',
+    {
+      title: 'YNAB entity lookup',
+      description:
+        'Compact listings of the ids and names the other ynab_* tools consume. ' +
+        'entity=budgets (all budgets — everything else defaults to the last-used one), ' +
+        'accounts (balances, types, transfer_payee_id for transfers), payees, or scheduled ' +
+        '(recurring transactions and next dates). id narrows to one record (accounts and ' +
+        'payees also accept a name); include_closed adds closed accounts.',
+      inputSchema: {
+        budget_id: budgetId,
+        entity: z.enum(['budgets', 'accounts', 'payees', 'scheduled']),
+        id: z.string().optional().describe('One record by id (accounts/payees: name works too)'),
+        include_closed: z.boolean().optional().describe('Include closed accounts'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async args => {
+      try {
+        return jsonResult(
+          await ynabLookup(getConnections().ynab.get(), {
+            budgetId: args.budget_id,
+            entity: args.entity,
+            id: args.id,
+            includeClosed: args.include_closed,
+          }),
+        );
+      } catch (error) {
+        return errorResult('YNAB lookup failed', error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'ynab_assign',
+    {
+      title: 'Assign money to YNAB categories',
+      description:
+        'The budgeting write: set or adjust the assigned amount of one or more categories ' +
+        'for a month, in one call. Each assignment names a category (name or id) and ' +
+        'exactly one of set (the absolute assigned amount) or adjust (a ± delta on it); ' +
+        'moving money is one category adjusted down and another up together. month: "next" ' +
+        "is the one-month-ahead move — assign this month's income into next month until " +
+        'Ready to Assign is 0. Amounts accept 250.5 or "$250.50". dry_run previews ' +
+        'before/after per category, the exact requests, and the projected Ready to Assign — ' +
+        'use it to propose changes before committing.',
+      inputSchema: {
+        budget_id: budgetId,
+        month: ynabMonth,
+        assignments: z
+          .array(
+            z.object({
+              category: z.string().describe('Category name or id'),
+              set: ynabAmount.optional().describe('Absolute assigned amount for the month'),
+              adjust: ynabAmount.optional().describe('± change to the current assigned amount'),
+            }),
+          )
+          .min(1)
+          .describe('One entry per category; exactly one of set/adjust each'),
+        dry_run: dryRun,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false },
+    },
+    async args => {
+      try {
+        return jsonResult(
+          await ynabAssign(getConnections().ynab.get(), {
+            budgetId: args.budget_id,
+            month: args.month,
+            assignments: args.assignments,
+            dryRun: args.dry_run,
+          }),
+        );
+      } catch (error) {
+        return errorResult('YNAB assign failed', error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'ynab_write_transaction',
+    {
+      title: 'Create, update, or delete a YNAB transaction',
+      description:
+        'The id decides the verb: without transaction_id this creates (account, date, ' +
+        'amount required); with it, it updates just the fields you pass; delete: true ' +
+        'deletes. Amounts accept 250.5 or "$250.50"; negative = outflow/spending. account ' +
+        'and category take a name or id; payee takes a payee name (YNAB matches or creates ' +
+        'it) or id. A frequency or a future date makes it a scheduled (recurring) ' +
+        'transaction automatically — pass scheduled: true when updating or deleting one, ' +
+        'since ids do not say. splits creates a split transaction; the API cannot edit ' +
+        'splits afterwards (delete and recreate). Writes real records — prefer dry_run ' +
+        'first.',
+      inputSchema: {
+        budget_id: budgetId,
+        transaction_id: z
+          .string()
+          .optional()
+          .describe('Update this transaction instead of creating one'),
+        delete: z.boolean().optional().describe('Delete the transaction (needs transaction_id)'),
+        scheduled: z
+          .boolean()
+          .optional()
+          .describe('Target a scheduled transaction (auto-detected on create)'),
+        account: z.string().optional().describe('Account name or id (required to create)'),
+        date: z.string().optional().describe('YYYY-MM-DD (required to create)'),
+        amount: ynabAmount.optional().describe('Currency units; negative = outflow, e.g. "-$45"'),
+        payee: z.string().optional().describe('Payee name (matched or created) or payee id'),
+        category: z.string().optional().describe('Category name or id'),
+        memo: z.string().optional(),
+        cleared: z.enum(CLEARED_STATES).optional(),
+        approved: z.boolean().optional(),
+        flag_color: z.enum(FLAG_COLORS).optional(),
+        import_id: z
+          .string()
+          .optional()
+          .describe('Dedup key (create only): a repeat with the same import_id is rejected'),
+        frequency: z
+          .enum(FREQUENCIES)
+          .optional()
+          .describe('Makes it recurring ("never" = one-time scheduled)'),
+        splits: z
+          .array(
+            z.object({
+              amount: ynabAmount.describe('Split amount; splits must sum to the total'),
+              category: z.string().optional().describe('Category name or id'),
+              payee: z.string().optional(),
+              memo: z.string().optional(),
+            }),
+          )
+          .optional()
+          .describe('Create as a split transaction (2+ entries)'),
+        dry_run: dryRun,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true },
+    },
+    async args => {
+      try {
+        return jsonResult(
+          await ynabWriteTransaction(getConnections().ynab.get(), {
+            budgetId: args.budget_id,
+            transactionId: args.transaction_id,
+            delete: args.delete,
+            scheduled: args.scheduled,
+            account: args.account,
+            date: args.date,
+            amount: args.amount,
+            payee: args.payee,
+            category: args.category,
+            memo: args.memo,
+            cleared: args.cleared,
+            approved: args.approved,
+            flagColor: args.flag_color,
+            importId: args.import_id,
+            frequency: args.frequency,
+            splits: args.splits,
+            dryRun: args.dry_run,
+          }),
+        );
+      } catch (error) {
+        return errorResult('YNAB write transaction failed', error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'ynab_write_category',
+    {
+      title: 'Create or update YNAB categories and groups',
+      description:
+        'The "priorities changed" write. Without category: creates one (name and group ' +
+        'required). With category (name or id): renames via name, moves via group, edits ' +
+        'note, and manages the target — target_amount sets one (optionally with ' +
+        'target_date OR target_frequency), remove_target removes it. new_group creates a ' +
+        'category group; group + rename_group_to renames one. The API cannot delete or ' +
+        'hide categories — that stays in the app. Prefer dry_run first.',
+      inputSchema: {
+        budget_id: budgetId,
+        category: z
+          .string()
+          .optional()
+          .describe('Existing category to update (name or id); omit to create'),
+        name: z.string().optional().describe('Category name: the new category, or a rename'),
+        group: z
+          .string()
+          .optional()
+          .describe('Category group (name or id): home on create, move on update'),
+        note: z.string().optional(),
+        target_amount: ynabAmount.optional().describe('Target ("goal") amount, e.g. "$400"'),
+        target_date: z
+          .string()
+          .optional()
+          .describe('YYYY-MM-DD target date (not with target_frequency)'),
+        target_frequency: z
+          .enum(TARGET_FREQUENCIES)
+          .optional()
+          .describe('monthly, weekly, or yearly refill cadence (not with target_date)'),
+        remove_target: z.boolean().optional().describe('Remove the existing target'),
+        new_group: z
+          .string()
+          .optional()
+          .describe('Create a category group with this name (combines with nothing else)'),
+        rename_group_to: z.string().optional().describe('Rename the group passed in group'),
+        dry_run: dryRun,
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false },
+    },
+    async args => {
+      try {
+        return jsonResult(
+          await ynabWriteCategory(getConnections().ynab.get(), {
+            budgetId: args.budget_id,
+            category: args.category,
+            name: args.name,
+            group: args.group,
+            note: args.note,
+            targetAmount: args.target_amount,
+            targetDate: args.target_date,
+            targetFrequency: args.target_frequency,
+            removeTarget: args.remove_target,
+            newGroup: args.new_group,
+            renameGroupTo: args.rename_group_to,
+            dryRun: args.dry_run,
+          }),
+        );
+      } catch (error) {
+        return errorResult('YNAB write category failed', error);
       }
     },
   );
@@ -404,11 +590,6 @@ export function buildServer(): McpServer {
     .enum(['replace', 'append'])
     .optional()
     .describe('replace (default) swaps in the exercises you pass; append adds them at the end');
-
-  const dryRun = z
-    .boolean()
-    .optional()
-    .describe('Return the request body that would be sent, without sending it');
 
   server.registerTool(
     'hevy_search_exercise_catalog',

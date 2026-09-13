@@ -19,6 +19,34 @@ import {
   type MuscleGroup,
   type TemplateResolver,
 } from './hevy-payloads.js';
+import {
+  buildCategoryBody,
+  buildScheduledBody,
+  buildTransactionBody,
+  followingMonth,
+  isUuid,
+  monthIso,
+  parseAmount,
+  planAssignments,
+  resolveMonth,
+  resolveRef,
+  shapeAccounts,
+  shapeBudgets,
+  shapeCategoryDetail,
+  shapeCategoryGroups,
+  shapeMonthCategories,
+  shapeOverview,
+  shapePayees,
+  shapeScheduled,
+  shapeTransaction,
+  shapeTransactions,
+  toNamed,
+  type AssignmentItem,
+  type BuiltSplit,
+  type CategoryFields,
+  type Named,
+  type TransactionFields,
+} from './ynab-payloads.js';
 
 /**
  * Handler logic for the personal-tools MCP, ported from `my-mcp-platform` (Python/FastMCP)
@@ -29,13 +57,21 @@ import {
  * All functions take the connection client as an argument so they unit-test against fakes
  * (see `tools.test.ts`), mirroring `../personal-context/tools.ts`.
  *
- * YNAB conventions preserved from the source: raw endpoints return amounts in milliunits
- * (1000 = 1 currency unit); the report helpers divide by 1000 into currency units.
+ * YNAB conventions (September 2026 reformat): every tool speaks currency units — writes
+ * parse human amounts ("$250.50", "250,50 EUR") into milliunits via `ynab-payloads.ts`,
+ * reads divide by 1000 — and categories/accounts/payees are addressed by name or id.
  */
 
 // ---------------------------------------------------------------------------
 // YNAB
 // ---------------------------------------------------------------------------
+//
+// September 2026 reformat (docs/feat_requirements/YNAB_TOOLS_REFORMAT_SEP_13TH.md):
+// 8 intent-level tools shaped for scheduled/hook agents. Currency units everywhere
+// (writes parse human amounts like "$250.50" via ynab-payloads.ts); categories,
+// accounts and payees are addressed by name or id; months accept current/next/
+// YYYY-MM(-01); every write takes dry_run. Endpoints use `/plans/...` — YNAB's
+// v1.79.0 rename of budgets — while tool params keep the familiar budget_id.
 
 const DEFAULT_BUDGET = 'last-used';
 
@@ -46,25 +82,17 @@ const LIABILITY_TYPES = new Set([
   'mortgage',
   'autoLoan',
   'studentLoan',
+  'personalLoan',
   'medicalDebt',
   'otherDebt',
 ]);
 
-/** Compact per-transaction view — keeps token usage low for the default listing mode. */
-const SIMPLE_TRANSACTION_FIELDS = [
-  'id',
-  'date',
-  'amount',
-  'payee_name',
-  'category_name',
-  'account_name',
-  'memo',
-  'approved',
-  'cleared',
-  'deleted',
-] as const;
-
 type Json = Record<string, unknown>;
+
+/** The `/plans/{id}` path prefix every YNAB endpoint hangs off. */
+function plan(budgetId?: string): string {
+  return `/plans/${budgetId ?? DEFAULT_BUDGET}`;
+}
 
 /** Unwraps YNAB's `{ data: { <key>: ... } }` envelope; returns the raw result if absent. */
 function unwrap(result: unknown, key: string): unknown {
@@ -75,162 +103,575 @@ function unwrap(result: unknown, key: string): unknown {
   return result;
 }
 
+/** Like `unwrap` but tries several keys — the plans rename changed some envelope keys. */
+function unwrapAny(result: unknown, ...keys: string[]): unknown {
+  const data = (result as Json | undefined)?.data;
+  if (data && typeof data === 'object') {
+    for (const key of keys) {
+      if (key in (data as Json)) {
+        return (data as Json)[key];
+      }
+    }
+  }
+  return result;
+}
+
 function asArray(value: unknown): Json[] {
   return Array.isArray(value) ? (value as Json[]) : [];
 }
 
-function simplifyTransactions(transactions: unknown): unknown {
-  return asArray(transactions).map(txn =>
-    Object.fromEntries(
-      SIMPLE_TRANSACTION_FIELDS.filter(field => field in txn).map(field => [field, txn[field]]),
-    ),
-  );
-}
-
-export interface YnabBudgetsArgs {
-  budgetId?: string;
-}
-
-/** Without `budgetId`: all budgets. With it: that budget's full detail. */
-export async function ynabBudgets(client: YnabClient, args: YnabBudgetsArgs): Promise<unknown> {
-  if (args.budgetId) {
-    return unwrap(await client.get(`/budgets/${args.budgetId}`), 'budget');
+/** All non-deleted categories (flat) plus their groups, for name resolution. */
+async function loadCategories(
+  client: YnabClient,
+  budgetId: string | undefined,
+): Promise<{ groups: (Named & Json)[]; flat: (Named & Json)[] }> {
+  const raw = asArray(unwrap(await client.get(`${plan(budgetId)}/categories`), 'category_groups'));
+  const flat: (Named & Json)[] = [];
+  for (const group of raw) {
+    if (!group.deleted) {
+      flat.push(...toNamed(group.categories));
+    }
   }
-  return unwrap(await client.get('/budgets'), 'budgets');
+  return { groups: toNamed(raw), flat };
 }
 
-export interface YnabAccountsArgs {
-  budgetId?: string;
-  accountId?: string;
-}
-
-export async function ynabAccounts(client: YnabClient, args: YnabAccountsArgs): Promise<unknown> {
-  const budget = args.budgetId ?? DEFAULT_BUDGET;
-  if (args.accountId) {
-    return unwrap(await client.get(`/budgets/${budget}/accounts/${args.accountId}`), 'account');
+async function resolveAccountId(
+  client: YnabClient,
+  budgetId: string | undefined,
+  ref: string,
+): Promise<string> {
+  if (isUuid(ref)) {
+    return ref;
   }
-  return unwrap(await client.get(`/budgets/${budget}/accounts`), 'accounts');
+  const accounts = toNamed(unwrap(await client.get(`${plan(budgetId)}/accounts`), 'accounts'));
+  return resolveRef(accounts, ref, 'account').id;
 }
+
+async function resolvePayeeId(
+  client: YnabClient,
+  budgetId: string | undefined,
+  ref: string,
+): Promise<string> {
+  if (isUuid(ref)) {
+    return ref;
+  }
+  const payees = toNamed(unwrap(await client.get(`${plan(budgetId)}/payees`), 'payees'));
+  return resolveRef(payees, ref, 'payee').id;
+}
+
+// --- ynab_overview ---------------------------------------------------------
+
+export interface YnabOverviewArgs {
+  budgetId?: string;
+  month?: string;
+}
+
+/**
+ * The one-call budget-health snapshot (3 parallel GETs): the requested month, the
+ * month after it (the one-month-ahead target — tolerated missing when YNAB hasn't
+ * materialized it), and scheduled transactions for the upcoming-bills window.
+ */
+export async function ynabOverview(client: YnabClient, args: YnabOverviewArgs): Promise<unknown> {
+  const budget = plan(args.budgetId);
+  const monthPath = resolveMonth(args.month);
+  const followingIso = followingMonth(monthIso(args.month));
+  const [monthRes, followingRes, scheduledRes] = await Promise.all([
+    client.get(`${budget}/months/${monthPath}`),
+    client.get(`${budget}/months/${followingIso}`).catch(() => undefined),
+    client.get(`${budget}/scheduled_transactions`).catch(() => undefined),
+  ]);
+  return shapeOverview({
+    month: unwrap(monthRes, 'month') as Json,
+    following: followingRes ? (unwrap(followingRes, 'month') as Json) : undefined,
+    scheduled: scheduledRes ? unwrap(scheduledRes, 'scheduled_transactions') : undefined,
+  });
+}
+
+// --- ynab_transactions -----------------------------------------------------
 
 export interface YnabTransactionsArgs {
   budgetId?: string;
   transactionId?: string;
-  accountId?: string;
-  categoryId?: string;
-  payeeId?: string;
+  account?: string;
+  category?: string;
+  payee?: string;
   sinceDate?: string;
+  untilDate?: string;
   type?: 'uncategorized' | 'unapproved';
+  limit?: number;
   verbose?: boolean;
 }
 
 /**
- * One transaction-query tool covering the four Python listing tools plus single-get. Scope
- * precedence: transactionId > accountId > categoryId > payeeId > budget-wide. The budget-wide
- * listing requires `sinceDate` (same guard as the source — unbounded listings blow up context).
+ * One transaction-query tool. Scope precedence: transactionId (single) > account >
+ * category > payee > budget-wide (then sinceDate is required — unbounded listings
+ * blow up context). Scopes accept names or ids; compact view in currency units.
  */
 export async function ynabTransactions(
   client: YnabClient,
   args: YnabTransactionsArgs,
 ): Promise<unknown> {
-  const budget = args.budgetId ?? DEFAULT_BUDGET;
+  const budget = plan(args.budgetId);
   if (args.transactionId) {
-    return unwrap(
-      await client.get(`/budgets/${budget}/transactions/${args.transactionId}`),
-      'transaction',
-    );
+    const raw = unwrap(await client.get(`${budget}/transactions/${args.transactionId}`), 'transaction') as Json;
+    return args.verbose ? raw : shapeTransaction(raw);
   }
 
-  const params = { since_date: args.sinceDate, type: args.type };
-  let endpoint = `/budgets/${budget}/transactions`;
-  if (args.accountId) {
-    endpoint = `/budgets/${budget}/accounts/${args.accountId}/transactions`;
-  } else if (args.categoryId) {
-    endpoint = `/budgets/${budget}/categories/${args.categoryId}/transactions`;
-  } else if (args.payeeId) {
-    endpoint = `/budgets/${budget}/payees/${args.payeeId}/transactions`;
+  const params = { since_date: args.sinceDate, until_date: args.untilDate, type: args.type };
+  let endpoint = `${budget}/transactions`;
+  if (args.account) {
+    endpoint = `${budget}/accounts/${await resolveAccountId(client, args.budgetId, args.account)}/transactions`;
+  } else if (args.category) {
+    const categoryId = isUuid(args.category)
+      ? args.category
+      : resolveRef((await loadCategories(client, args.budgetId)).flat, args.category, 'category').id;
+    endpoint = `${budget}/categories/${categoryId}/transactions`;
+  } else if (args.payee) {
+    endpoint = `${budget}/payees/${await resolvePayeeId(client, args.budgetId, args.payee)}/transactions`;
   } else if (!args.sinceDate) {
     throw new Error(
-      'sinceDate is required (YYYY-MM-DD) unless filtering by transactionId, accountId, categoryId, or payeeId',
+      'since_date is required (YYYY-MM-DD) unless filtering by transaction_id, account, category, or payee',
     );
   }
 
-  const transactions = unwrap(await client.get(endpoint, params), 'transactions');
-  return args.verbose ? transactions : simplifyTransactions(transactions);
+  const raw = asArray(unwrap(await client.get(endpoint, params), 'transactions'));
+  if (args.verbose) {
+    return raw
+      .sort((a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')))
+      .slice(0, args.limit ?? 30);
+  }
+  return shapeTransactions(raw, { limit: args.limit });
 }
 
-export interface YnabCreateTransactionArgs {
-  budgetId?: string;
-  accountId: string;
-  date: string;
-  amount: number;
-  payeeName?: string;
-  categoryId?: string;
-  memo?: string;
-}
-
-export async function ynabCreateTransaction(
-  client: YnabClient,
-  args: YnabCreateTransactionArgs,
-): Promise<unknown> {
-  const budget = args.budgetId ?? DEFAULT_BUDGET;
-  const transaction: Json = {
-    account_id: args.accountId,
-    date: args.date,
-    amount: args.amount,
-  };
-  if (args.payeeName) {
-    transaction.payee_name = args.payeeName;
-  }
-  if (args.categoryId) {
-    transaction.category_id = args.categoryId;
-  }
-  if (args.memo) {
-    transaction.memo = args.memo;
-  }
-  return unwrap(await client.post(`/budgets/${budget}/transactions`, { transaction }), 'transaction');
-}
+// --- ynab_categories -------------------------------------------------------
 
 export interface YnabCategoriesArgs {
   budgetId?: string;
-  categoryId?: string;
+  category?: string;
   month?: string;
+  includeHidden?: boolean;
 }
 
 /**
- * Without `categoryId`: all category groups. With it: that category, month-scoped (includes
- * goal progress) — `month` is `current` or `YYYY-MM-01`.
+ * Without `category`: compact grouped list for a month (current month comes from
+ * `/categories` in one GET; other months join the month detail with the group
+ * names). With it (name or id): that category's full month-scoped target picture.
  */
 export async function ynabCategories(
   client: YnabClient,
   args: YnabCategoriesArgs,
 ): Promise<unknown> {
-  const budget = args.budgetId ?? DEFAULT_BUDGET;
-  if (args.categoryId) {
-    const month = args.month ?? 'current';
-    return unwrap(
-      await client.get(`/budgets/${budget}/months/${month}/categories/${args.categoryId}`),
+  const budget = plan(args.budgetId);
+  const monthPath = resolveMonth(args.month);
+  if (args.category) {
+    const categoryId = isUuid(args.category)
+      ? args.category
+      : resolveRef((await loadCategories(client, args.budgetId)).flat, args.category, 'category').id;
+    const raw = unwrap(
+      await client.get(`${budget}/months/${monthPath}/categories/${categoryId}`),
       'category',
-    );
+    ) as Json;
+    return shapeCategoryDetail(raw);
   }
-  return unwrap(await client.get(`/budgets/${budget}/categories`), 'category_groups');
-}
-
-export async function ynabPayees(
-  client: YnabClient,
-  args: { budgetId?: string },
-): Promise<unknown> {
-  return unwrap(await client.get(`/budgets/${args.budgetId ?? DEFAULT_BUDGET}/payees`), 'payees');
-}
-
-export async function ynabScheduled(
-  client: YnabClient,
-  args: { budgetId?: string },
-): Promise<unknown> {
-  return unwrap(
-    await client.get(`/budgets/${args.budgetId ?? DEFAULT_BUDGET}/scheduled_transactions`),
-    'scheduled_transactions',
+  if (monthPath === 'current') {
+    const groups = unwrap(await client.get(`${budget}/categories`), 'category_groups');
+    return shapeCategoryGroups(groups, { includeHidden: args.includeHidden });
+  }
+  const [monthRes, groupsRes] = await Promise.all([
+    client.get(`${budget}/months/${monthPath}`),
+    client.get(`${budget}/categories`),
+  ]);
+  return shapeMonthCategories(
+    unwrap(monthRes, 'month') as Json,
+    unwrap(groupsRes, 'category_groups'),
+    { includeHidden: args.includeHidden },
   );
 }
+
+// --- ynab_lookup -----------------------------------------------------------
+
+export interface YnabLookupArgs {
+  budgetId?: string;
+  entity: 'budgets' | 'accounts' | 'payees' | 'scheduled';
+  id?: string;
+  includeClosed?: boolean;
+}
+
+/** Compact utility listings — the ids/names the other tools consume. */
+export async function ynabLookup(client: YnabClient, args: YnabLookupArgs): Promise<unknown> {
+  const budget = plan(args.budgetId);
+  switch (args.entity) {
+    case 'budgets': {
+      const list = shapeBudgets(unwrapAny(await client.get('/plans'), 'plans', 'budgets'));
+      if (!args.id) {
+        return list;
+      }
+      const hit = list.find(entry => entry.id === args.id || entry.name === args.id);
+      if (!hit) {
+        throw new Error(`no budget matching "${args.id}"`);
+      }
+      return hit;
+    }
+    case 'accounts': {
+      const raw = unwrap(await client.get(`${budget}/accounts`), 'accounts');
+      if (args.id) {
+        const account = resolveRef(toNamed(raw), args.id, 'account');
+        return shapeAccounts([account], { includeClosed: true })[0];
+      }
+      return shapeAccounts(raw, { includeClosed: args.includeClosed });
+    }
+    case 'payees': {
+      const raw = unwrap(await client.get(`${budget}/payees`), 'payees');
+      if (args.id) {
+        const payee = resolveRef(toNamed(raw), args.id, 'payee');
+        return shapePayees([payee])[0];
+      }
+      return shapePayees(raw);
+    }
+    case 'scheduled': {
+      const raw = unwrap(await client.get(`${budget}/scheduled_transactions`), 'scheduled_transactions');
+      if (args.id) {
+        const hit = asArray(raw).find(entry => entry.id === args.id);
+        if (!hit) {
+          throw new Error(`no scheduled transaction with id ${args.id}`);
+        }
+        return shapeScheduled([hit])[0];
+      }
+      return shapeScheduled(raw);
+    }
+  }
+}
+
+// --- ynab_assign -----------------------------------------------------------
+
+export interface YnabAssignArgs {
+  budgetId?: string;
+  month?: string;
+  assignments: AssignmentItem[];
+  dryRun?: boolean;
+}
+
+/**
+ * The one-month-ahead write: reads the month once, resolves category names against
+ * it, computes before→after (set = absolute, adjust = ±delta; a move is one down +
+ * one up in the same call), then PATCHes each category's assigned amount. dry_run
+ * previews the exact requests plus the projected Ready to Assign.
+ */
+export async function ynabAssign(client: YnabClient, args: YnabAssignArgs): Promise<unknown> {
+  const budget = plan(args.budgetId);
+  const monthPath = resolveMonth(args.month);
+  const monthRaw = unwrap(await client.get(`${budget}/months/${monthPath}`), 'month') as Json;
+  const pool = asArray(monthRaw.categories)
+    .filter(category => !category.deleted)
+    .map(category => ({
+      id: String(category.id ?? ''),
+      name: String(category.name ?? ''),
+      budgeted: typeof category.budgeted === 'number' ? category.budgeted : 0,
+    }));
+  const changes = planAssignments(pool, args.assignments);
+
+  const deltaMilli = changes.reduce((total, change) => total + (change.afterMilli - change.beforeMilli), 0);
+  const rtaMilli = typeof monthRaw.to_be_budgeted === 'number' ? monthRaw.to_be_budgeted : 0;
+  const summary = {
+    month: String(monthRaw.month ?? '').slice(0, 7),
+    changes: changes.map(change => ({
+      category: change.name,
+      before: change.beforeMilli / 1000,
+      after: change.afterMilli / 1000,
+    })),
+    ready_to_assign_projected: (rtaMilli - deltaMilli) / 1000,
+  };
+
+  if (args.dryRun) {
+    return {
+      dry_run: true,
+      requests: changes.map(change => ({
+        method: 'PATCH',
+        endpoint: `${budget}/months/${monthPath}/categories/${change.id}`,
+        payload: { category: { budgeted: change.afterMilli } },
+      })),
+      ...summary,
+    };
+  }
+  for (const change of changes) {
+    await client.patch(`${budget}/months/${monthPath}/categories/${change.id}`, {
+      category: { budgeted: change.afterMilli },
+    });
+  }
+  return summary;
+}
+
+// --- ynab_write_transaction ------------------------------------------------
+
+export interface YnabWriteTransactionSplit {
+  amount: string | number;
+  category?: string;
+  payee?: string;
+  memo?: string;
+}
+
+export interface YnabWriteTransactionArgs {
+  budgetId?: string;
+  transactionId?: string;
+  delete?: boolean;
+  scheduled?: boolean;
+  account?: string;
+  date?: string;
+  amount?: string | number;
+  payee?: string;
+  category?: string;
+  memo?: string;
+  cleared?: string;
+  approved?: boolean;
+  flagColor?: string;
+  importId?: string;
+  frequency?: string;
+  splits?: YnabWriteTransactionSplit[];
+  dryRun?: boolean;
+}
+
+/**
+ * Transaction create/update/delete — the id decides the verb, `delete: true` the
+ * delete. A `frequency` or a future date routes to the scheduled-transaction
+ * endpoints (YNAB rejects future dates on regular ones); `scheduled` forces the
+ * routing explicitly, which updates/deletes need since their ids don't say.
+ */
+export async function ynabWriteTransaction(
+  client: YnabClient,
+  args: YnabWriteTransactionArgs,
+): Promise<unknown> {
+  const budget = plan(args.budgetId);
+  const today = new Date().toISOString().slice(0, 10);
+  const creating = !args.transactionId;
+
+  if (args.delete) {
+    if (!args.transactionId) {
+      throw new Error('delete: true needs transaction_id');
+    }
+    const endpoint = args.scheduled
+      ? `${budget}/scheduled_transactions/${args.transactionId}`
+      : `${budget}/transactions/${args.transactionId}`;
+    if (args.dryRun) {
+      return dryRunResult('DELETE', endpoint, undefined);
+    }
+    const res = await client.delete(endpoint);
+    return { deleted: true, record: unwrapAny(res, 'transaction', 'scheduled_transaction') };
+  }
+
+  const isScheduled =
+    args.scheduled ??
+    (args.frequency !== undefined || (creating && args.date !== undefined && args.date > today));
+
+  let categoriesCache: Awaited<ReturnType<typeof loadCategories>> | undefined;
+  const categoryPool = async () =>
+    (categoriesCache ??= await loadCategories(client, args.budgetId)).flat;
+
+  const fields: TransactionFields & { frequency?: string } = {};
+  if (args.account !== undefined) {
+    fields.accountId = await resolveAccountId(client, args.budgetId, args.account);
+  }
+  if (args.date !== undefined) fields.date = args.date;
+  if (args.amount !== undefined) fields.amountMilli = parseAmount(args.amount, 'amount');
+  if (args.payee !== undefined) {
+    if (isUuid(args.payee)) {
+      fields.payeeId = args.payee;
+    } else {
+      fields.payeeName = args.payee; // YNAB matches an existing payee by name or creates one
+    }
+  }
+  if (args.category !== undefined) {
+    fields.categoryId = isUuid(args.category)
+      ? args.category
+      : resolveRef(await categoryPool(), args.category, 'category').id;
+  }
+  if (args.memo !== undefined) fields.memo = args.memo;
+  if (args.cleared !== undefined) fields.cleared = args.cleared;
+  if (args.approved !== undefined) fields.approved = args.approved;
+  if (args.flagColor !== undefined) fields.flagColor = args.flagColor;
+  if (args.importId !== undefined) fields.importId = args.importId;
+  if (args.frequency !== undefined) fields.frequency = args.frequency;
+
+  if (args.splits?.length) {
+    if (!creating) {
+      throw new Error(
+        'the YNAB API cannot edit splits after creation — delete the transaction and recreate it',
+      );
+    }
+    fields.subtransactions = [];
+    for (const [index, split] of args.splits.entries()) {
+      try {
+        const built: BuiltSplit = { amount: parseAmount(split.amount, 'amount') };
+        if (split.category !== undefined) {
+          built.category_id = isUuid(split.category)
+            ? split.category
+            : resolveRef(await categoryPool(), split.category, 'category').id;
+        }
+        if (split.payee !== undefined) built.payee_name = split.payee;
+        if (split.memo !== undefined) built.memo = split.memo;
+        fields.subtransactions.push(built);
+      } catch (error) {
+        throw new Error(`splits[${index}]: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
+  if (isScheduled) {
+    const body = buildScheduledBody(fields, { create: creating });
+    const endpoint = creating
+      ? `${budget}/scheduled_transactions`
+      : `${budget}/scheduled_transactions/${args.transactionId}`;
+    const payload = { scheduled_transaction: body };
+    if (args.dryRun) {
+      return dryRunResult(creating ? 'POST' : 'PUT', endpoint, payload);
+    }
+    const res = creating ? await client.post(endpoint, payload) : await client.put(endpoint, payload);
+    const record = unwrap(res, 'scheduled_transaction') as Json;
+    return { record_type: 'scheduled_transaction', record: shapeScheduled([record])[0] ?? record };
+  }
+
+  if (creating && typeof fields.date === 'string' && fields.date > today) {
+    // Only reachable with an explicit scheduled: false.
+    throw new Error(
+      `YNAB rejects future-dated transactions (${fields.date}) — drop scheduled: false, or pass frequency: "never" for a one-time scheduled transaction`,
+    );
+  }
+  const body = buildTransactionBody(fields, { create: creating });
+  const endpoint = creating ? `${budget}/transactions` : `${budget}/transactions/${args.transactionId}`;
+  const payload = { transaction: body };
+  if (args.dryRun) {
+    return dryRunResult(creating ? 'POST' : 'PUT', endpoint, payload);
+  }
+  const res = creating ? await client.post(endpoint, payload) : await client.put(endpoint, payload);
+  return { record_type: 'transaction', record: shapeTransaction(unwrap(res, 'transaction') as Json) };
+}
+
+// --- ynab_write_category ---------------------------------------------------
+
+export interface YnabWriteCategoryArgs {
+  budgetId?: string;
+  category?: string;
+  name?: string;
+  group?: string;
+  note?: string;
+  targetAmount?: string | number;
+  targetDate?: string;
+  targetFrequency?: string;
+  removeTarget?: boolean;
+  newGroup?: string;
+  renameGroupTo?: string;
+  dryRun?: boolean;
+}
+
+/**
+ * The "priorities changed" write: create a category (name + group), rename/move/
+ * annotate an existing one, set/change/remove its target, create a category group
+ * (new_group), or rename one (group + rename_group_to). The YNAB API cannot delete
+ * or hide categories — that stays in the app.
+ */
+export async function ynabWriteCategory(
+  client: YnabClient,
+  args: YnabWriteCategoryArgs,
+): Promise<unknown> {
+  const budget = plan(args.budgetId);
+  const touchesCategory =
+    args.category !== undefined ||
+    args.name !== undefined ||
+    args.note !== undefined ||
+    args.targetAmount !== undefined ||
+    args.targetDate !== undefined ||
+    args.targetFrequency !== undefined ||
+    Boolean(args.removeTarget);
+
+  if (args.newGroup !== undefined) {
+    if (touchesCategory || args.renameGroupTo !== undefined || args.group !== undefined) {
+      throw new Error(
+        'new_group creates a category group and combines with nothing else — create the group first, then the category',
+      );
+    }
+    const endpoint = `${budget}/category_groups`;
+    const payload = { category_group: { name: args.newGroup } };
+    if (args.dryRun) {
+      return dryRunResult('POST', endpoint, payload);
+    }
+    return {
+      record_type: 'category_group',
+      record: unwrap(await client.post(endpoint, payload), 'category_group'),
+    };
+  }
+
+  if (args.renameGroupTo !== undefined) {
+    if (touchesCategory) {
+      throw new Error('rename_group_to renames a category group and combines with nothing else');
+    }
+    if (!args.group) {
+      throw new Error('rename_group_to needs group (the group to rename, by name or id)');
+    }
+    const { groups } = await loadCategories(client, args.budgetId);
+    const groupId = isUuid(args.group) ? args.group : resolveRef(groups, args.group, 'category group').id;
+    const endpoint = `${budget}/category_groups/${groupId}`;
+    const payload = { category_group: { name: args.renameGroupTo } };
+    if (args.dryRun) {
+      return dryRunResult('PATCH', endpoint, payload);
+    }
+    return {
+      record_type: 'category_group',
+      record: unwrap(await client.patch(endpoint, payload), 'category_group'),
+    };
+  }
+
+  const creating = args.category === undefined;
+  if (creating && args.removeTarget) {
+    throw new Error('remove_target only applies to an existing category — pass category');
+  }
+  if (args.removeTarget && args.targetAmount !== undefined) {
+    throw new Error('pass either remove_target or target_amount, not both');
+  }
+
+  const { groups, flat } = await loadCategories(client, args.budgetId);
+  const fields: CategoryFields = {};
+  if (args.name !== undefined) fields.name = args.name;
+  if (args.note !== undefined) fields.note = args.note;
+  if (args.group !== undefined) {
+    fields.groupId = isUuid(args.group) ? args.group : resolveRef(groups, args.group, 'category group').id;
+  }
+  if (args.removeTarget) {
+    fields.goalTargetMilli = null;
+  } else if (args.targetAmount !== undefined) {
+    fields.goalTargetMilli = parseAmount(args.targetAmount, 'target_amount');
+  }
+  if (args.targetDate !== undefined) fields.goalTargetDate = args.targetDate;
+  if (args.targetFrequency !== undefined) fields.goalFrequency = args.targetFrequency;
+
+  const body = buildCategoryBody(fields, { create: creating });
+  if (creating) {
+    const endpoint = `${budget}/categories`;
+    const payload = { category: body };
+    if (args.dryRun) {
+      return dryRunResult('POST', endpoint, payload);
+    }
+    return {
+      record_type: 'category',
+      record: shapeCategoryDetail(unwrap(await client.post(endpoint, payload), 'category') as Json),
+    };
+  }
+  if (Object.keys(body).length === 0) {
+    throw new Error('nothing to change — pass name, group, note, or target fields');
+  }
+  const categoryId = isUuid(args.category as string)
+    ? (args.category as string)
+    : resolveRef(flat, args.category as string, 'category').id;
+  const endpoint = `${budget}/categories/${categoryId}`;
+  const payload = { category: body };
+  if (args.dryRun) {
+    return dryRunResult('PATCH', endpoint, payload);
+  }
+  return {
+    record_type: 'category',
+    record: shapeCategoryDetail(unwrap(await client.patch(endpoint, payload), 'category') as Json),
+  };
+}
+
+// --- ynab_report -----------------------------------------------------------
 
 interface NetWorthReport {
   total_assets: number;
@@ -240,7 +681,7 @@ interface NetWorthReport {
 }
 
 async function netWorth(client: YnabClient, budget: string): Promise<NetWorthReport> {
-  const accounts = asArray(unwrap(await client.get(`/budgets/${budget}/accounts`), 'accounts'));
+  const accounts = asArray(unwrap(await client.get(`${budget}/accounts`), 'accounts'));
   let assets = 0;
   let liabilities = 0;
   const breakdown: Json[] = [];
@@ -287,7 +728,7 @@ function summariseMonth(month: Json): Json {
 }
 
 async function monthlySummary(client: YnabClient, budget: string, month: string): Promise<Json> {
-  const data = unwrap(await client.get(`/budgets/${budget}/months/${month}`), 'month') as Json;
+  const data = unwrap(await client.get(`${budget}/months/${month}`), 'month') as Json;
   const summary = summariseMonth(data);
   const topCategories: Json[] = [];
   for (const category of asArray(data.categories)) {
@@ -320,18 +761,18 @@ export interface YnabReportArgs {
   monthsBack?: number;
 }
 
-/** Aggregated reports (currency units, not milliunits) — the `reports.py` port. */
+/** Aggregated reports (currency units) — net worth, monthly cash-flow, history. */
 export async function ynabReport(client: YnabClient, args: YnabReportArgs): Promise<unknown> {
-  const budget = args.budgetId ?? DEFAULT_BUDGET;
+  const budget = plan(args.budgetId);
   if (args.kind === 'net_worth') {
     return netWorth(client, budget);
   }
   if (args.kind === 'monthly_summary') {
-    return monthlySummary(client, budget, args.month ?? 'current');
+    return monthlySummary(client, budget, resolveMonth(args.month));
   }
 
   const monthsBack = args.monthsBack ?? 3;
-  const allMonths = asArray(unwrap(await client.get(`/budgets/${budget}/months`), 'months'));
+  const allMonths = asArray(unwrap(await client.get(`${budget}/months`), 'months'));
   const history = allMonths
     .sort((a, b) => String(b.month ?? '').localeCompare(String(a.month ?? '')))
     .slice(0, monthsBack)

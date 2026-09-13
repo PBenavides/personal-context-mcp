@@ -5,7 +5,9 @@ import type { Connection, ConnectionHealth } from './types.js';
  * The YNAB connection: a thin authenticated HTTP client for the YNAB v1 REST API
  * (https://api.ynab.com/v1), consumed by the personal-tools MCP. Endpoint paths and
  * response shaping live in `src/mcps/personal-tools/tools.ts`; this layer only owns
- * auth, transport, and error surfacing.
+ * auth, transport, and error surfacing. Write verbs exist because the tool surface
+ * assigns money to categories (PATCH), edits transactions (PUT), and deletes them
+ * (DELETE); YNAB renamed budgets→plans in API v1.79.0, so endpoints use `/plans/...`.
  *
  * Unconfigured (no `YNAB_TOKEN`) the connection stays inert and `maybe()` returns
  * undefined — ynab_* tools report themselves unconfigured, so credential-free dev/test
@@ -13,10 +15,16 @@ import type { Connection, ConnectionHealth } from './types.js';
  */
 
 export interface YnabClient {
-  /** GET `endpoint` (e.g. `/budgets/last-used/accounts`); undefined params are dropped. */
+  /** GET `endpoint` (e.g. `/plans/last-used/accounts`); undefined params are dropped. */
   get(endpoint: string, params?: Record<string, string | undefined>): Promise<unknown>;
   /** POST `endpoint` with a JSON body. */
   post(endpoint: string, body: unknown): Promise<unknown>;
+  /** PUT `endpoint` with a JSON body (full update of one record). */
+  put(endpoint: string, body: unknown): Promise<unknown>;
+  /** PATCH `endpoint` with a JSON body (partial update, e.g. month-category `budgeted`). */
+  patch(endpoint: string, body: unknown): Promise<unknown>;
+  /** DELETE `endpoint`; YNAB returns the deleted record. */
+  delete(endpoint: string): Promise<unknown>;
 }
 
 export interface YnabConnection extends Connection<YnabClient> {
@@ -54,7 +62,7 @@ export function createYnabConnection(
   const baseUrl = config.baseUrl.replace(/\/$/, '');
 
   async function request(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
     endpoint: string,
     params?: Record<string, string | undefined>,
     body?: unknown,
@@ -78,6 +86,9 @@ export function createYnabConnection(
   const client: YnabClient = {
     get: (endpoint, params) => request('GET', endpoint, params),
     post: (endpoint, body) => request('POST', endpoint, undefined, body),
+    put: (endpoint, body) => request('PUT', endpoint, undefined, body),
+    patch: (endpoint, body) => request('PATCH', endpoint, undefined, body),
+    delete: endpoint => request('DELETE', endpoint),
   };
 
   return {

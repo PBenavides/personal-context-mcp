@@ -15,22 +15,34 @@ import {
   hevyRoutines,
   hevySearchExerciseCatalog,
   hevyWriteRoutine,
+  ynabAssign,
   ynabCategories,
-  ynabCreateTransaction,
+  ynabLookup,
+  ynabOverview,
   ynabReport,
   ynabTransactions,
+  ynabWriteCategory,
+  ynabWriteTransaction,
 } from './tools.js';
+import { followingMonth, monthIso } from './ynab-payloads.js';
 
-/** Fake YNAB client: canned responses per endpoint, records calls for assertions. */
-function fakeYnab(responses: Record<string, unknown>): YnabClient & {
+/**
+ * Fake YNAB client: canned responses per endpoint, records calls for assertions.
+ * GETs are strict (an unlisted endpoint throws); writes fall back to an empty
+ * envelope so tests can focus on the recorded method/endpoint/body.
+ */
+function fakeYnab(responses: Record<string, unknown> = {}): YnabClient & {
   calls: { method: string; endpoint: string; params?: unknown; body?: unknown }[];
 } {
   const calls: { method: string; endpoint: string; params?: unknown; body?: unknown }[] = [];
-  const lookup = (endpoint: string): unknown => {
-    if (!(endpoint in responses)) {
-      throw new Error(`Unexpected endpoint: ${endpoint}`);
+  const lookup = (endpoint: string, fallback?: unknown): unknown => {
+    if (endpoint in responses) {
+      return responses[endpoint];
     }
-    return responses[endpoint];
+    if (fallback !== undefined) {
+      return fallback;
+    }
+    throw new Error(`Unexpected endpoint: ${endpoint}`);
   };
   return {
     calls,
@@ -40,180 +52,680 @@ function fakeYnab(responses: Record<string, unknown>): YnabClient & {
     },
     async post(endpoint, body) {
       calls.push({ method: 'POST', endpoint, body });
-      return lookup(endpoint);
+      return lookup(endpoint, { data: {} });
+    },
+    async put(endpoint, body) {
+      calls.push({ method: 'PUT', endpoint, body });
+      return lookup(endpoint, { data: {} });
+    },
+    async patch(endpoint, body) {
+      calls.push({ method: 'PATCH', endpoint, body });
+      return lookup(endpoint, { data: {} });
+    },
+    async delete(endpoint) {
+      calls.push({ method: 'DELETE', endpoint });
+      return lookup(endpoint, { data: {} });
     },
   };
 }
 
-describe('ynabTransactions', () => {
-  const transactions = [
-    {
-      id: 't1',
-      date: '2026-07-01',
-      amount: -12340,
-      payee_name: 'Cafe',
-      category_name: 'Dining',
-      account_name: 'Checking',
-      memo: null,
-      approved: true,
-      cleared: 'cleared',
-      deleted: false,
-      subtransactions: [{ id: 'sub1' }],
-      import_id: 'abc',
+/** Category groups as `GET /plans/{id}/categories` returns them (current-month numbers). */
+const CATEGORY_GROUPS = {
+  data: {
+    category_groups: [
+      {
+        id: 'g1',
+        name: 'Essentials',
+        hidden: false,
+        deleted: false,
+        categories: [
+          {
+            id: 'c1',
+            name: 'Groceries',
+            category_group_id: 'g1',
+            budgeted: 300000,
+            activity: -180000,
+            balance: 120000,
+            hidden: false,
+            deleted: false,
+            goal_type: 'NEED',
+            goal_target: 400000,
+            goal_under_funded: 100000,
+            goal_percentage_complete: 75,
+          },
+          {
+            id: 'c2',
+            name: 'Dining Out',
+            category_group_id: 'g1',
+            budgeted: 100000,
+            activity: -145250,
+            balance: -45250,
+            hidden: false,
+            deleted: false,
+          },
+        ],
+      },
+      {
+        id: 'g2',
+        name: 'Internal Master Category',
+        hidden: false,
+        deleted: false,
+        categories: [
+          {
+            id: 'c9',
+            name: 'Inflow: Ready to Assign',
+            category_group_id: 'g2',
+            budgeted: 0,
+            activity: 0,
+            balance: 0,
+            hidden: false,
+            deleted: false,
+          },
+        ],
+      },
+      {
+        id: 'g3',
+        name: 'Someday',
+        hidden: true,
+        deleted: false,
+        categories: [
+          {
+            id: 'c8',
+            name: 'Sabbatical',
+            category_group_id: 'g3',
+            budgeted: 0,
+            activity: 0,
+            balance: 0,
+            hidden: true,
+            deleted: false,
+          },
+        ],
+      },
+    ],
+  },
+};
+
+function monthResponse(month: string, overrides: Record<string, unknown> = {}): unknown {
+  return {
+    data: {
+      month: {
+        month,
+        income: 3200000,
+        budgeted: 3100000,
+        activity: -1850000,
+        to_be_budgeted: 0,
+        age_of_money: 34,
+        categories: [
+          {
+            id: 'c1',
+            name: 'Groceries',
+            category_group_id: 'g1',
+            budgeted: 300000,
+            activity: -180000,
+            balance: 120000,
+            hidden: false,
+            deleted: false,
+          },
+          {
+            id: 'c2',
+            name: 'Dining Out',
+            category_group_id: 'g1',
+            budgeted: 100000,
+            activity: -145250,
+            balance: -45250,
+            hidden: false,
+            deleted: false,
+          },
+        ],
+        ...overrides,
+      },
     },
-  ];
+  };
+}
 
-  it('requires since_date for budget-wide listings', async () => {
-    const client = fakeYnab({});
-    await expect(ynabTransactions(client, {})).rejects.toThrow('sinceDate is required');
-    expect(client.calls).toHaveLength(0);
+const ACCOUNTS = {
+  data: {
+    accounts: [
+      {
+        id: 'a1',
+        name: 'Checking',
+        type: 'checking',
+        balance: 1500000,
+        on_budget: true,
+        transfer_payee_id: 'tp1',
+        closed: false,
+        deleted: false,
+      },
+      {
+        id: 'a2',
+        name: 'Visa',
+        type: 'creditCard',
+        balance: -250000,
+        on_budget: true,
+        transfer_payee_id: 'tp2',
+        closed: false,
+        deleted: false,
+      },
+      {
+        id: 'a3',
+        name: 'Old savings',
+        type: 'savings',
+        balance: 99000,
+        on_budget: false,
+        closed: true,
+        deleted: false,
+      },
+    ],
+  },
+};
+
+describe('ynabOverview', () => {
+  const nextIso = followingMonth(monthIso(undefined));
+
+  it('answers budget health in one shot: RTA, month-ahead, overspending, upcoming bills', async () => {
+    const soon = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+    const client = fakeYnab({
+      '/plans/last-used/months/current': monthResponse('2026-09-01'),
+      [`/plans/last-used/months/${nextIso}`]: monthResponse(nextIso, {
+        to_be_budgeted: 420500,
+        budgeted: 2980500,
+        categories: [
+          {
+            id: 'c1',
+            name: 'Groceries',
+            category_group_id: 'g1',
+            budgeted: 280000,
+            activity: 0,
+            balance: 280000,
+            hidden: false,
+            deleted: false,
+            goal_type: 'NEED',
+            goal_under_funded: 120000,
+          },
+          {
+            id: 'c2',
+            name: 'Dining Out',
+            category_group_id: 'g1',
+            budgeted: 100000,
+            activity: 0,
+            balance: 100000,
+            hidden: false,
+            deleted: false,
+            goal_type: 'NEED',
+            goal_under_funded: 0,
+          },
+        ],
+      }),
+      '/plans/last-used/scheduled_transactions': {
+        data: {
+          scheduled_transactions: [
+            {
+              id: 's1',
+              date_next: soon,
+              frequency: 'monthly',
+              amount: -1200000,
+              payee_name: 'Landlord',
+              category_name: 'Rent',
+              deleted: false,
+            },
+            {
+              id: 's2',
+              date_next: '2099-01-01',
+              frequency: 'yearly',
+              amount: -50000,
+              payee_name: 'Domain registrar',
+              deleted: false,
+            },
+          ],
+        },
+      },
+    });
+
+    const result = (await ynabOverview(client, {})) as Record<string, unknown>;
+    expect(result).toMatchObject({
+      month: '2026-09',
+      ready_to_assign: { this_month: 0, next_month: 420.5 },
+      age_of_money: 34,
+      income: 3200,
+      assigned: 3100,
+      activity: -1850,
+      month_ahead: {
+        fully_funded: false,
+        underfunded_total: 120,
+        underfunded: [{ category: 'Groceries', needed: 120 }],
+      },
+      overspent: [{ category: 'Dining Out', overspent_by: 45.25 }],
+    });
+    const upcoming = result.upcoming_scheduled as { payee_name: string }[];
+    expect(upcoming).toHaveLength(1);
+    expect(upcoming[0].payee_name).toBe('Landlord');
+    expect((result.alerts as string[]).length).toBeGreaterThan(0);
   });
 
-  it('returns the compact view by default and passes filters through', async () => {
+  it('degrades when the following month is not materialized yet', async () => {
     const client = fakeYnab({
-      '/budgets/last-used/transactions': { data: { transactions } },
+      '/plans/last-used/months/current': monthResponse('2026-09-01'),
     });
-    const result = (await ynabTransactions(client, {
-      sinceDate: '2026-07-01',
-      type: 'unapproved',
-    })) as Record<string, unknown>[];
-    expect(client.calls[0].params).toEqual({ since_date: '2026-07-01', type: 'unapproved' });
-    expect(result).toHaveLength(1);
-    expect(result[0].payee_name).toBe('Cafe');
-    expect(result[0]).not.toHaveProperty('subtransactions');
-    expect(result[0]).not.toHaveProperty('import_id');
-  });
-
-  it('returns full objects when verbose', async () => {
-    const client = fakeYnab({
-      '/budgets/last-used/transactions': { data: { transactions } },
-    });
-    const result = (await ynabTransactions(client, {
-      sinceDate: '2026-07-01',
-      verbose: true,
-    })) as Record<string, unknown>[];
-    expect(result[0]).toHaveProperty('subtransactions');
-  });
-
-  it('scopes to an account without requiring since_date', async () => {
-    const client = fakeYnab({
-      '/budgets/b1/accounts/a1/transactions': { data: { transactions: [] } },
-    });
-    await ynabTransactions(client, { budgetId: 'b1', accountId: 'a1' });
-    expect(client.calls[0].endpoint).toBe('/budgets/b1/accounts/a1/transactions');
-  });
-
-  it('fetches a single transaction by id', async () => {
-    const client = fakeYnab({
-      '/budgets/last-used/transactions/t1': { data: { transaction: transactions[0] } },
-    });
-    const result = (await ynabTransactions(client, { transactionId: 't1' })) as Record<
-      string,
-      unknown
-    >;
-    expect(result.id).toBe('t1');
+    const result = (await ynabOverview(client, {})) as Record<string, unknown>;
+    expect(result.month).toBe('2026-09');
+    expect(result.month_ahead).toBeUndefined();
+    expect(result.ready_to_assign).toEqual({ this_month: 0 });
   });
 });
 
-describe('ynabCreateTransaction', () => {
-  it('posts the transaction envelope and unwraps the response', async () => {
+describe('ynabTransactions', () => {
+  const transactions = {
+    data: {
+      transactions: [
+        {
+          id: 't1',
+          date: '2026-07-01',
+          amount: -12340,
+          payee_name: 'Cafe',
+          category_name: 'Dining Out',
+          account_name: 'Checking',
+          memo: null,
+          approved: true,
+          cleared: 'cleared',
+          deleted: false,
+          import_id: 'YNAB:-12340:2026-07-01:1',
+          subtransactions: [],
+        },
+        {
+          id: 't2',
+          date: '2026-07-03',
+          amount: 500000,
+          payee_name: 'Employer',
+          category_name: 'Inflow: Ready to Assign',
+          account_name: 'Checking',
+          approved: true,
+          cleared: 'cleared',
+          deleted: false,
+        },
+      ],
+    },
+  };
+
+  it('requires since_date for budget-wide listings, before any request', async () => {
+    const client = fakeYnab();
+    await expect(ynabTransactions(client, {})).rejects.toThrow(/since_date is required/);
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it('returns a compact currency-unit view, newest first', async () => {
+    const client = fakeYnab({ '/plans/last-used/transactions': transactions });
+    const result = (await ynabTransactions(client, { sinceDate: '2026-07-01' })) as Record<
+      string,
+      unknown
+    >[];
+    expect(result.map(txn => txn.id)).toEqual(['t2', 't1']);
+    expect(result[1]).toEqual({
+      id: 't1',
+      date: '2026-07-01',
+      amount: -12.34,
+      payee_name: 'Cafe',
+      category_name: 'Dining Out',
+      account_name: 'Checking',
+      approved: true,
+      cleared: 'cleared',
+    });
+    expect(client.calls[0].params).toMatchObject({ since_date: '2026-07-01' });
+  });
+
+  it('scopes to an account by name, resolving the id first', async () => {
     const client = fakeYnab({
-      '/budgets/last-used/transactions': { data: { transaction: { id: 'new1' } } },
+      '/plans/last-used/accounts': ACCOUNTS,
+      '/plans/last-used/accounts/a1/transactions': transactions,
     });
-    const result = (await ynabCreateTransaction(client, {
-      accountId: 'a1',
-      date: '2026-07-19',
-      amount: -5000,
-      payeeName: 'Store',
-    })) as Record<string, unknown>;
-    expect(client.calls[0]).toMatchObject({
-      method: 'POST',
-      body: {
-        transaction: { account_id: 'a1', date: '2026-07-19', amount: -5000, payee_name: 'Store' },
-      },
-    });
-    expect(result.id).toBe('new1');
+    await ynabTransactions(client, { account: 'checking' });
+    expect(client.calls.map(call => call.endpoint)).toEqual([
+      '/plans/last-used/accounts',
+      '/plans/last-used/accounts/a1/transactions',
+    ]);
+  });
+
+  it('applies limit and honours verbose', async () => {
+    const client = fakeYnab({ '/plans/last-used/transactions': transactions });
+    const result = (await ynabTransactions(client, {
+      sinceDate: '2026-07-01',
+      limit: 1,
+      verbose: true,
+    })) as Record<string, unknown>[];
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('t2');
+    expect(result[0].import_id).toBeUndefined(); // t2 has none; raw objects pass through
+    expect(result[0].cleared).toBe('cleared');
   });
 });
 
 describe('ynabCategories', () => {
-  it('lists category groups by default', async () => {
-    const client = fakeYnab({
-      '/budgets/last-used/categories': { data: { category_groups: [{ name: 'Bills' }] } },
+  it('lists groups compactly, skipping hidden and housekeeping groups', async () => {
+    const client = fakeYnab({ '/plans/last-used/categories': CATEGORY_GROUPS });
+    const result = (await ynabCategories(client, {})) as Record<string, unknown>[];
+    expect(result).toHaveLength(1);
+    expect(result[0].group).toBe('Essentials');
+    const categories = result[0].categories as Record<string, unknown>[];
+    expect(categories[0]).toEqual({
+      id: 'c1',
+      name: 'Groceries',
+      assigned: 300,
+      activity: -180,
+      available: 120,
+      target: { type: 'NEED', target: 400, under_funded: 100, pct: 75 },
     });
-    expect(await ynabCategories(client, {})).toEqual([{ name: 'Bills' }]);
   });
 
-  it('scopes one category to a month', async () => {
+  it('fetches one category by name, month-scoped', async () => {
     const client = fakeYnab({
-      '/budgets/last-used/months/2026-07-01/categories/c1': {
-        data: { category: { id: 'c1', goal_percentage_complete: 40 } },
+      '/plans/last-used/categories': CATEGORY_GROUPS,
+      '/plans/last-used/months/current/categories/c1': {
+        data: {
+          category: {
+            id: 'c1',
+            name: 'Groceries',
+            category_group_name: 'Essentials',
+            budgeted: 300000,
+            activity: -180000,
+            balance: 120000,
+            goal_type: 'NEED',
+            goal_target: 400000,
+            goal_under_funded: 100000,
+            goal_overall_funded: 300000,
+          },
+        },
       },
     });
-    const result = (await ynabCategories(client, {
-      categoryId: 'c1',
-      month: '2026-07-01',
+    const result = (await ynabCategories(client, { category: 'grocer' })) as Record<
+      string,
+      unknown
+    >;
+    expect(result.name).toBe('Groceries');
+    expect(result.category_group_name).toBe('Essentials');
+    expect(result.target).toMatchObject({ type: 'NEED', target: 400, overall_funded: 300 });
+  });
+});
+
+describe('ynabLookup', () => {
+  it('lists budgets compactly', async () => {
+    const client = fakeYnab({
+      '/plans': {
+        data: {
+          plans: [{ id: 'b1', name: 'Main', last_modified_on: '2026-09-01T00:00:00Z', extra: 1 }],
+        },
+      },
+    });
+    expect(await ynabLookup(client, { entity: 'budgets' })).toEqual([
+      { id: 'b1', name: 'Main', last_modified_on: '2026-09-01T00:00:00Z' },
+    ]);
+  });
+
+  it('lists open accounts with transfer payees, hiding closed ones', async () => {
+    const client = fakeYnab({ '/plans/last-used/accounts': ACCOUNTS });
+    const result = (await ynabLookup(client, { entity: 'accounts' })) as Record<
+      string,
+      unknown
+    >[];
+    expect(result.map(account => account.name)).toEqual(['Checking', 'Visa']);
+    expect(result[0]).toMatchObject({ balance: 1500, transfer_payee_id: 'tp1' });
+  });
+
+  it('sorts scheduled transactions by next date', async () => {
+    const client = fakeYnab({
+      '/plans/last-used/scheduled_transactions': {
+        data: {
+          scheduled_transactions: [
+            { id: 's2', date_next: '2026-10-01', frequency: 'monthly', amount: -50000, deleted: false },
+            { id: 's1', date_next: '2026-09-15', frequency: 'monthly', amount: -1200000, deleted: false },
+          ],
+        },
+      },
+    });
+    const result = (await ynabLookup(client, { entity: 'scheduled' })) as Record<
+      string,
+      unknown
+    >[];
+    expect(result.map(txn => txn.id)).toEqual(['s1', 's2']);
+    expect(result[0].amount).toBe(-1200);
+  });
+});
+
+describe('ynabAssign', () => {
+  const month = monthResponse('2026-09-01', { to_be_budgeted: 500000 });
+
+  it('sets and adjusts in one call, PATCHing absolute milliunit amounts', async () => {
+    const client = fakeYnab({ '/plans/last-used/months/current': month });
+    const result = await ynabAssign(client, {
+      assignments: [
+        { category: 'Groceries', set: '$400' },
+        { category: 'Dining', adjust: -50 },
+      ],
+    });
+    const patches = client.calls.filter(call => call.method === 'PATCH');
+    expect(patches).toEqual([
+      {
+        method: 'PATCH',
+        endpoint: '/plans/last-used/months/current/categories/c1',
+        body: { category: { budgeted: 400000 } },
+      },
+      {
+        method: 'PATCH',
+        endpoint: '/plans/last-used/months/current/categories/c2',
+        body: { category: { budgeted: 50000 } },
+      },
+    ]);
+    expect(result).toEqual({
+      month: '2026-09',
+      changes: [
+        { category: 'Groceries', before: 300, after: 400 },
+        { category: 'Dining Out', before: 100, after: 50 },
+      ],
+      ready_to_assign_projected: 450,
+    });
+  });
+
+  it('dry_run previews the requests without writing', async () => {
+    const client = fakeYnab({ '/plans/last-used/months/current': month });
+    const result = (await ynabAssign(client, {
+      assignments: [{ category: 'Groceries', set: 400 }],
+      dryRun: true,
     })) as Record<string, unknown>;
-    expect(result.goal_percentage_complete).toBe(40);
+    expect(result.dry_run).toBe(true);
+    expect(result.requests).toHaveLength(1);
+    expect(client.calls.some(call => call.method === 'PATCH')).toBe(false);
+  });
+
+  it('refuses ambiguous names with the candidates listed', async () => {
+    const client = fakeYnab({ '/plans/last-used/months/current': month });
+    await expect(
+      ynabAssign(client, { assignments: [{ category: 'o', set: 1 }] }),
+    ).rejects.toThrow(/ambiguous.*Groceries.*Dining Out/s);
+    expect(client.calls.some(call => call.method === 'PATCH')).toBe(false);
+  });
+
+  it('targets next month for the one-month-ahead move', async () => {
+    const nextIso = followingMonth(monthIso(undefined));
+    const client = fakeYnab({ [`/plans/last-used/months/${nextIso}`]: month });
+    await ynabAssign(client, {
+      month: 'next',
+      assignments: [{ category: 'Groceries', set: 400 }],
+    });
+    expect(client.calls[1].endpoint).toBe(`/plans/last-used/months/${nextIso}/categories/c1`);
+  });
+});
+
+describe('ynabWriteTransaction', () => {
+  it('creates with names resolved and a human amount parsed', async () => {
+    const client = fakeYnab({
+      '/plans/last-used/accounts': ACCOUNTS,
+      '/plans/last-used/categories': CATEGORY_GROUPS,
+      '/plans/last-used/transactions': {
+        data: {
+          transaction: {
+            id: 't9',
+            date: '2026-09-10',
+            amount: -45000,
+            payee_name: 'Cafe',
+            category_name: 'Dining Out',
+            account_name: 'Checking',
+            approved: false,
+            cleared: 'uncleared',
+          },
+        },
+      },
+    });
+    const result = await ynabWriteTransaction(client, {
+      account: 'Checking',
+      date: '2026-09-10',
+      amount: '-$45',
+      payee: 'Cafe',
+      category: 'Dining',
+    });
+    const post = client.calls.find(call => call.method === 'POST');
+    expect(post?.endpoint).toBe('/plans/last-used/transactions');
+    expect(post?.body).toEqual({
+      transaction: {
+        account_id: 'a1',
+        date: '2026-09-10',
+        amount: -45000,
+        payee_name: 'Cafe',
+        category_id: 'c2',
+      },
+    });
+    expect(result).toMatchObject({ record_type: 'transaction' });
+  });
+
+  it('routes a future date to the scheduled endpoints', async () => {
+    const future = new Date(Date.now() + 10 * 86400000).toISOString().slice(0, 10);
+    const client = fakeYnab({
+      '/plans/last-used/accounts': ACCOUNTS,
+      '/plans/last-used/scheduled_transactions': {
+        data: { scheduled_transaction: { id: 's9', date_next: future, amount: -45000, deleted: false } },
+      },
+    });
+    const result = await ynabWriteTransaction(client, {
+      account: 'Checking',
+      date: future,
+      amount: -45,
+    });
+    const post = client.calls.find(call => call.method === 'POST');
+    expect(post?.endpoint).toBe('/plans/last-used/scheduled_transactions');
+    expect(result).toMatchObject({ record_type: 'scheduled_transaction' });
+  });
+
+  it('updates only the supplied fields', async () => {
+    const client = fakeYnab({
+      '/plans/last-used/transactions/t1': {
+        data: { transaction: { id: 't1', date: '2026-09-01', amount: -1000, memo: 'lunch' } },
+      },
+    });
+    await ynabWriteTransaction(client, { transactionId: 't1', memo: 'lunch' });
+    const put = client.calls.find(call => call.method === 'PUT');
+    expect(put?.endpoint).toBe('/plans/last-used/transactions/t1');
+    expect(put?.body).toEqual({ transaction: { memo: 'lunch' } });
+  });
+
+  it('dry_run previews a delete without calling', async () => {
+    const client = fakeYnab();
+    const result = await ynabWriteTransaction(client, {
+      transactionId: 't1',
+      delete: true,
+      dryRun: true,
+    });
+    expect(result).toMatchObject({
+      dry_run: true,
+      method: 'DELETE',
+      endpoint: '/plans/last-used/transactions/t1',
+    });
+    expect(client.calls).toHaveLength(0);
+  });
+
+  it('refuses split edits — an API impossibility', async () => {
+    const client = fakeYnab();
+    await expect(
+      ynabWriteTransaction(client, {
+        transactionId: 't1',
+        splits: [{ amount: 1 }, { amount: 2 }],
+      }),
+    ).rejects.toThrow(/cannot edit splits/);
+    expect(client.calls).toHaveLength(0);
+  });
+});
+
+describe('ynabWriteCategory', () => {
+  it('creates a category with a target in a group resolved by name', async () => {
+    const client = fakeYnab({
+      '/plans/last-used/categories': CATEGORY_GROUPS,
+      // POST target falls back to an empty envelope
+    });
+    await ynabWriteCategory(client, {
+      name: 'Travel',
+      group: 'Essentials',
+      targetAmount: '$400',
+    });
+    const post = client.calls.find(call => call.method === 'POST');
+    expect(post?.endpoint).toBe('/plans/last-used/categories');
+    expect(post?.body).toEqual({
+      category: { name: 'Travel', category_group_id: 'g1', goal_target: 400000 },
+    });
+  });
+
+  it('removes a target with goal_target: null', async () => {
+    const client = fakeYnab({ '/plans/last-used/categories': CATEGORY_GROUPS });
+    await ynabWriteCategory(client, { category: 'Groceries', removeTarget: true });
+    const patch = client.calls.find(call => call.method === 'PATCH');
+    expect(patch?.endpoint).toBe('/plans/last-used/categories/c1');
+    expect(patch?.body).toEqual({ category: { goal_target: null } });
+  });
+
+  it('keeps new_group a single-purpose operation', async () => {
+    const client = fakeYnab();
+    await expect(
+      ynabWriteCategory(client, { newGroup: 'Wellness', name: 'Gym' }),
+    ).rejects.toThrow(/combines with nothing else/);
+    expect(client.calls).toHaveLength(0);
   });
 });
 
 describe('ynabReport', () => {
-  const accounts = [
-    { name: 'Checking', type: 'checking', balance: 1_500_000, closed: false },
-    { name: 'Visa', type: 'creditCard', balance: -250_000, closed: false },
-    { name: 'Old', type: 'checking', balance: 999_000, closed: true },
-  ];
-
   it('computes net worth in currency units, skipping closed accounts', async () => {
-    const client = fakeYnab({ '/budgets/last-used/accounts': { data: { accounts } } });
-    const result = (await ynabReport(client, { kind: 'net_worth' })) as Record<string, unknown>;
+    const client = fakeYnab({ '/plans/last-used/accounts': ACCOUNTS });
+    const result = (await ynabReport(client, { kind: 'net_worth' })) as {
+      total_assets: number;
+      total_liabilities: number;
+      net_worth: number;
+      account_breakdown: unknown[];
+    };
     expect(result.total_assets).toBe(1500);
     expect(result.total_liabilities).toBe(-250);
     expect(result.net_worth).toBe(1250);
-    expect((result.account_breakdown as unknown[]).length).toBe(2);
+    expect(result.account_breakdown).toHaveLength(2);
   });
 
-  it('computes a monthly summary with savings rate and top categories', async () => {
+  it('summarises a month with savings rate and top categories', async () => {
     const client = fakeYnab({
-      '/budgets/last-used/months/current': {
-        data: {
-          month: {
-            income: 4_000_000,
-            activity: -3_000_000,
-            budgeted: 3_500_000,
-            categories: [
-              { name: 'Rent', activity: -2_000_000, budgeted: 2_000_000, balance: 0 },
-              { name: 'Dining', activity: -1_000_000, budgeted: 500_000, balance: -500_000 },
-              { name: 'Refund', activity: 50_000 },
-              { name: 'Gone', activity: -10_000, deleted: true },
-            ],
-          },
-        },
-      },
+      '/plans/last-used/months/current': monthResponse('2026-09-01', {
+        income: 2000000,
+        activity: -1500000,
+      }),
     });
     const result = (await ynabReport(client, { kind: 'monthly_summary' })) as Record<
       string,
       unknown
     >;
-    expect(result.income).toBe(4000);
-    expect(result.spending).toBe(3000);
-    expect(result.savings_rate).toBe(25);
+    expect(result).toMatchObject({ income: 2000, spending: 1500, net_savings: 500, savings_rate: 25 });
     const top = result.top_categories as { name: string }[];
-    expect(top.map(category => category.name)).toEqual(['Rent', 'Dining']);
+    expect(top.map(category => category.name)).toEqual(['Groceries', 'Dining Out']);
   });
 
   it('builds the full report with newest-first history', async () => {
     const client = fakeYnab({
-      '/budgets/last-used/accounts': { data: { accounts } },
-      '/budgets/last-used/months/current': { data: { month: { income: 0, activity: 0 } } },
-      '/budgets/last-used/months': {
+      '/plans/last-used/accounts': ACCOUNTS,
+      '/plans/last-used/months/current': monthResponse('2026-09-01'),
+      '/plans/last-used/months': {
         data: {
           months: [
-            { month: '2026-05-01', income: 1_000_000, activity: -800_000 },
-            { month: '2026-07-01', income: 1_000_000, activity: -500_000 },
-            { month: '2026-06-01', income: 1_000_000, activity: -900_000 },
-            { month: '2026-04-01', income: 1_000_000, activity: -100_000 },
+            { month: '2026-08-01', income: 2000000, activity: -1500000 },
+            { month: '2026-09-01', income: 3200000, activity: -1850000 },
           ],
         },
       },
@@ -223,8 +735,8 @@ describe('ynabReport', () => {
       unknown
     >;
     const history = result.monthly_history as { month: string; net_savings: number }[];
-    expect(history.map(entry => entry.month)).toEqual(['2026-07', '2026-06']);
-    expect(history[0].net_savings).toBe(500);
+    expect(history.map(entry => entry.month)).toEqual(['2026-09', '2026-08']);
+    expect(history[1].net_savings).toBe(500);
     expect(result.net_worth).toMatchObject({ net_worth: 1250 });
   });
 });
