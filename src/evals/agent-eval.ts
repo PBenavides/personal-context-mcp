@@ -74,7 +74,9 @@ async function chat(
 ): Promise<{ message: ChatMessage; usage?: Usage }> {
   const base = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
   let res: Response;
-  // Free models are rate-limited: back off on 429 instead of failing the case.
+  let data: { choices?: { message: ChatMessage }[]; usage?: Usage; error?: { code?: number } };
+  // Free models are rate-limited and their providers overload: back off on 429/5xx — which
+  // OpenRouter sometimes reports inside a 200 body — instead of failing the case.
   for (let attempt = 0; ; attempt++) {
     res = await fetch(`${base}/chat/completions`, {
       method: 'POST',
@@ -85,17 +87,24 @@ async function chat(
       },
       body: JSON.stringify({ model, messages, tools, temperature: 0 }),
     });
-    if (res.status !== 429 || attempt >= 4) {
+    const text = await res.text();
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = {};
+    }
+    const code = res.ok ? (data.error?.code ?? 200) : res.status;
+    const retryable = code === 429 || code >= 500;
+    if (!retryable || attempt >= 4) {
+      if (!res.ok) {
+        throw new Error(`OpenRouter ${res.status}: ${text.slice(0, 300)}`);
+      }
       break;
     }
     const wait = Number(res.headers.get('retry-after')) * 1000 || 5000 * 2 ** attempt;
-    console.log(`        (rate limited, retrying in ${Math.round(wait / 1000)}s)`);
+    console.log(`        (provider busy: ${code}, retrying in ${Math.round(wait / 1000)}s)`);
     await new Promise((r) => setTimeout(r, wait));
   }
-  if (!res.ok) {
-    throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  }
-  const data = (await res.json()) as { choices?: { message: ChatMessage }[]; usage?: Usage };
   const message = data.choices?.[0]?.message;
   if (!message) {
     throw new Error(`OpenRouter returned no choice: ${JSON.stringify(data).slice(0, 300)}`);
@@ -225,17 +234,24 @@ async function main(): Promise<void> {
     trace: Trace;
     tokens: Usage;
     ms: number;
+    infraError?: string;
   }[] = [];
   for (const spec of cases) {
     for (let run = 1; run <= opts.repeat; run++) {
       const { tokens, ms, ...trace } = await runCase(client, opts.model, instructions, tools, spec);
       const checks = scoreTrace(spec, trace);
-      runs.push({ case: spec.id, run, checks, trace, tokens, ms });
+      // An LLM API failure says nothing about the model's tool use: report it, don't score it.
+      const infraError = trace.aborted?.startsWith('OpenRouter') ? trace.aborted : undefined;
+      runs.push({ case: spec.id, run, checks, trace, tokens, ms, ...(infraError ? { infraError } : {}) });
       const failed = checks.filter((c) => !c.pass);
       console.log(
-        `${failed.length ? 'FAIL' : 'pass'}  ${spec.id} #${run}  ` +
+        `${infraError ? 'ERR ' : failed.length ? 'FAIL' : 'pass'}  ${spec.id} #${run}  ` +
           `${trace.calls.length} calls, ${tokens.prompt_tokens + tokens.completion_tokens} tok, ${(ms / 1000).toFixed(1)}s`,
       );
+      if (infraError) {
+        console.log(`        ! not scored: ${infraError.slice(0, 160)}`);
+        continue;
+      }
       for (const f of failed) {
         console.log(`        ✗ ${f.check}${f.detail ? ` — ${f.detail}` : ''}`);
       }
@@ -243,12 +259,18 @@ async function main(): Promise<void> {
   }
   await client.close();
 
-  const passed = runs.filter((r) => r.checks.every((c) => c.pass)).length;
-  console.log(`\n${passed}/${runs.length} runs passed (${opts.model})`);
+  const scored = runs.filter((r) => !r.infraError);
+  const passed = scored.filter((r) => r.checks.every((c) => c.pass)).length;
+  const errors = runs.length - scored.length;
+  console.log(
+    `\n${passed}/${scored.length} scored runs passed (${opts.model})` +
+      (errors ? `, ${errors} not scored (LLM API errors)` : ''),
+  );
   for (const spec of cases) {
-    const mine = runs.filter((r) => r.case === spec.id);
+    const mine = scored.filter((r) => r.case === spec.id);
     const ok = mine.filter((r) => r.checks.every((c) => c.pass)).length;
-    console.log(`  ${spec.id.padEnd(24)} ${ok}/${mine.length}`);
+    const err = runs.filter((r) => r.case === spec.id && r.infraError).length;
+    console.log(`  ${spec.id.padEnd(24)} ${ok}/${mine.length}${err ? `  (+${err} ERR)` : ''}`);
   }
 
   mkdirSync('eval-results', { recursive: true });

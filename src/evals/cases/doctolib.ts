@@ -16,7 +16,7 @@ export const doctolibCases: EvalCase[] = [
   },
   {
     id: 'english-gp-public',
-    probes: 'maps "English-speaking" and "public insurance" onto the filter arguments',
+    probes: 'maps "English-speaking" (Doctolib code "gb") and "public insurance" onto the filters',
     prompt:
       'I have public health insurance and need an English-speaking GP in Berlin. Who has the soonest slot?',
     expectCalls: [
@@ -24,7 +24,8 @@ export const doctolibCases: EvalCase[] = [
         tool: 'find_earliest_appointment',
         args: {
           specialty: { oneOf: ['allgemeinmedizin', 'hausarztlich-tatige-internist-in'] },
-          languages: { contains: 'en' },
+          // Doctolib codes English as "gb"; the server aliases "en", so either is a correct call.
+          languages: { oneOf: ['gb', 'en'] },
           insurance_sector: 'public',
         },
       },

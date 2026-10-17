@@ -52,6 +52,10 @@ These were all found against the live API while validating with MCP Inspector.
 - **`redirect_url` is not the profile.** `info.json` returns the specialty/city listing
   (`/zahnmedizin/berlin`). The profile is that plus the slug. Upstream's `booking_url`
   links to the listing; this one appends the slug.
+- **English is `gb`, not `en`.** The language filter takes flag-style codes: on
+  2026-10-17, public GPs in Berlin returned 0 with `en` and 464 with `gb`. The agent
+  eval caught this because the original tool description said `"en"`. The description
+  now says `gb`, and `en` is aliased to `gb` server-side.
 - **Search answers `206`**, not 200. Both count as success.
 - **`limit < 2` on availabilities is a `400`**, so the trailing window is floored at 2.
 - **`reason: "not_opened_availability"`** means the practice hasn't released slots that
@@ -95,6 +99,14 @@ booking it can't make, and calling tools for an unrelated question.
 npm run eval -- --mcp doctolib --dry-run                       # validate cases, no LLM
 npm run eval -- --mcp doctolib --model <openrouter-model-id> --repeat 3
 ```
+
+LLM API failures (rate limits, overloaded providers) are retried with backoff and, if
+they persist, reported as `ERR` and left out of the pass rate: they say nothing about
+the model's tool use. On free models they are common. On 2026-10-17 Gemma 4 31B and
+Nemotron 3 Ultra were both unusable for this reason, and `nvidia/nemotron-3-super-120b-a12b:free`
+worked. It scored 4/5 on the first run; the one failure was the `en`/`gb` bug above.
+After the fix it used `gb` every time, but one of two repeats still overran the call
+budget by re-running the same search.
 
 Use `--repeat`, because tool use varies from run to run, so report pass rates rather than
 one green run. Full traces land in `eval-results/` (gitignored). Comparing models, or a

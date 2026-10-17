@@ -60,12 +60,20 @@ function parseIds(value: string | number | number[]): number[] {
     .filter(Number.isFinite);
 }
 
+/**
+ * Doctolib's language filter takes flag-style codes: English is "gb", and "en" silently
+ * matches nobody (0 vs 464 public GPs in Berlin, 2026-10-17). Found by the agent eval —
+ * models reach for "en" — so it is aliased rather than left to fail.
+ */
+const LANGUAGE_ALIASES: Record<string, string> = { en: 'gb' };
+
 function parseLanguages(value: string | undefined): string[] | undefined {
   const langs = value
     ?.split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return langs?.length ? langs : undefined;
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+    .map((s) => LANGUAGE_ALIASES[s] ?? s);
+  return langs?.length ? [...new Set(langs)] : undefined;
 }
 
 /**
@@ -92,7 +100,10 @@ export function buildServer(): McpServer {
   const languages = z
     .string()
     .optional()
-    .describe('Comma-separated Doctolib language codes the doctor speaks, e.g. "en" or "tr,gb"');
+    .describe(
+      'Comma-separated Doctolib language codes the doctor speaks. These are flag-style: ' +
+        'English is "gb" (not "en"), e.g. "gb" or "tr,gb"',
+    );
   const telehealth = z
     .boolean()
     .optional()
