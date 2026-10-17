@@ -392,7 +392,11 @@ claude mcp add --transport http personal-tools http://localhost:3000/personal-to
   an ambiguous exercise name was refused with candidates. **No live write has
   been executed** — the create/update paths are verified only through `dry_run`
   and unit tests, because Hevy has no DELETE to undo a test record with.
-- Calendar tools (`gcal_*`) are implemented and unit-tested but **not yet
-  smoke-tested against a real Google account** — `GOOGLE_CALENDAR_REFRESH_TOKEN`
-  needs to be minted (see Secrets above) before `tools/list`/live calls can be
-  verified end-to-end.
+- Calendar tools (`gcal_*`), live against a real Google account (2026-10-17,
+  token minted with `npm run google:auth`): `gcal_list_calendars`,
+  `gcal_list_events` and `gcal_free_busy` returned real data; a throwaway event
+  went through `gcal_create_event` → `gcal_update_event` → `gcal_get_event` →
+  `gcal_delete_event`, and read back as `status: cancelled` afterwards (Google
+  keeps deleted events as cancelled tombstones; that is expected). A start of
+  10:00 `Europe/Berlin` came back as 12:00+04:00, so `timezone` is applied and
+  results arrive in the calendar's own zone.
