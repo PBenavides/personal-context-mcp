@@ -321,6 +321,16 @@ the server still boots, and the rest of the host is unaffected. Locally,
 JSON above; `GOOGLE_CALENDAR_REFRESH_TOKEN` requires the browser flow (never
 commit any of these — they're secrets, same tier as an API key).
 
+**Without `my-mcp-platform`:** create the client yourself. In Google Cloud Console,
+enable the Google Calendar API, configure the OAuth consent screen (External, your own
+address as a test user), and create an OAuth client of type **Desktop app**. Put its id
+and secret in `.env`, then run `npm run google:auth`
+(`src/scripts/google-auth.ts`). It opens the consent page, catches the redirect on a
+loopback port, and writes `GOOGLE_CALENDAR_REFRESH_TOKEN` into `.env` without printing
+it. While the consent screen stays in "Testing", Google expires the refresh token after
+7 days, so rerun it (or publish the app) when `gcal_*` starts failing with
+`invalid_grant`.
+
 The five SSM `SecureString` placeholders and the `deploy.sh`/`docker-compose.yml`
 plumbing already exist in `personal-infra/context` (Terraform `main.tf`,
 `deploy/deploy.sh`, `deploy/docker-compose.yml`) — real values still need to
