@@ -80,6 +80,27 @@ npx @modelcontextprotocol/inspector --cli http://localhost:3000/doctolib --trans
   --tool-arg specialty=zahnmedizin --tool-arg city=Berlin --tool-arg limit=3
 ```
 
+## Agent evals
+
+Inspector shows that the tools work. Agent evals show whether a model *uses* them well.
+`npm run eval` puts any OpenRouter model in front of the running endpoint, with the
+server's own instructions and tool schemas, and scores each run with deterministic
+checks (no LLM judge): which tools it called, with which arguments, how many calls, and
+regexes over the final answer. Cases live in `src/evals/cases/doctolib.ts`. Each one
+targets one failure mode: tool choice, filter mapping, the silent slug trap, claiming a
+booking it can't make, and calling tools for an unrelated question.
+
+```bash
+# OPENROUTER_API_KEY in .env, host running on :3000
+npm run eval -- --mcp doctolib --dry-run                       # validate cases, no LLM
+npm run eval -- --mcp doctolib --model <openrouter-model-id> --repeat 3
+```
+
+Use `--repeat`, because tool use varies from run to run, so report pass rates rather than
+one green run. Full traces land in `eval-results/` (gitignored). Comparing models, or a
+tool-description change before and after, on the same cases is how the descriptions get
+tuned. The cases hit the live API, so results also move when Doctolib does.
+
 The unit tests (`src/mcps/doctolib/tools.test.ts`) use a fake client built from
 upstream's recorded payloads and never touch the network. The smoke script only checks
 `tools/list` on `/doctolib`, so CI never calls doctolib.de.
