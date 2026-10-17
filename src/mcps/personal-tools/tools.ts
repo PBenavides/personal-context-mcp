@@ -120,6 +120,15 @@ function asArray(value: unknown): Json[] {
   return Array.isArray(value) ? (value as Json[]) : [];
 }
 
+/**
+ * YNAB 404s a month it has not materialized yet — months come into being only
+ * when something is assigned or scheduled into them, so a future month is
+ * routinely absent. Callers turn this into guidance rather than an HTTP error.
+ */
+function isNotFound(error: unknown): boolean {
+  return error instanceof Error && / failed: 404\b/.test(error.message);
+}
+
 /** All non-deleted categories (flat) plus their groups, for name resolution. */
 async function loadCategories(
   client: YnabClient,
@@ -177,12 +186,18 @@ export async function ynabOverview(client: YnabClient, args: YnabOverviewArgs): 
   const followingIso = followingMonth(monthIso(args.month));
   const [monthRes, followingRes, scheduledRes] = await Promise.all([
     client.get(`${budget}/months/${monthPath}`),
-    client.get(`${budget}/months/${followingIso}`).catch(() => undefined),
+    client.get(`${budget}/months/${followingIso}`).catch(error => {
+      if (isNotFound(error)) {
+        return undefined; // not open in YNAB yet — reported as such, not an error
+      }
+      throw error;
+    }),
     client.get(`${budget}/scheduled_transactions`).catch(() => undefined),
   ]);
   return shapeOverview({
     month: unwrap(monthRes, 'month') as Json,
     following: followingRes ? (unwrap(followingRes, 'month') as Json) : undefined,
+    followingIso,
     scheduled: scheduledRes ? unwrap(scheduledRes, 'scheduled_transactions') : undefined,
   });
 }
@@ -278,7 +293,15 @@ export async function ynabCategories(
     return shapeCategoryGroups(groups, { includeHidden: args.includeHidden });
   }
   const [monthRes, groupsRes] = await Promise.all([
-    client.get(`${budget}/months/${monthPath}`),
+    client.get(`${budget}/months/${monthPath}`).catch(error => {
+      if (isNotFound(error)) {
+        throw new Error(
+          `${monthPath.slice(0, 7)} is not open in YNAB yet — a month exists once something is ` +
+            'assigned or scheduled into it. Assign to it first (ynab_assign), or read "current".',
+        );
+      }
+      throw error;
+    }),
     client.get(`${budget}/categories`),
   ]);
   return shapeMonthCategories(
@@ -360,26 +383,56 @@ export interface YnabAssignArgs {
 export async function ynabAssign(client: YnabClient, args: YnabAssignArgs): Promise<unknown> {
   const budget = plan(args.budgetId);
   const monthPath = resolveMonth(args.month);
-  const monthRaw = unwrap(await client.get(`${budget}/months/${monthPath}`), 'month') as Json;
-  const pool = asArray(monthRaw.categories)
-    .filter(category => !category.deleted)
-    .map(category => ({
-      id: String(category.id ?? ''),
-      name: String(category.name ?? ''),
-      budgeted: typeof category.budgeted === 'number' ? category.budgeted : 0,
+  const monthRaw = (await client
+    .get(`${budget}/months/${monthPath}`)
+    .then(res => unwrap(res, 'month'))
+    .catch(error => {
+      if (isNotFound(error)) {
+        return undefined; // not open yet — assigning into it is what creates it
+      }
+      throw error;
+    })) as Json | undefined;
+
+  // An unopened month has no assigned amounts to read, so names resolve against the
+  // budget-wide category list and every category starts from 0. `adjust` has nothing
+  // to adjust there and is refused rather than silently treated as `set`.
+  let pool: { id: string; name: string; budgeted: number }[];
+  if (monthRaw) {
+    pool = asArray(monthRaw.categories)
+      .filter(category => !category.deleted)
+      .map(category => ({
+        id: String(category.id ?? ''),
+        name: String(category.name ?? ''),
+        budgeted: typeof category.budgeted === 'number' ? category.budgeted : 0,
+      }));
+  } else {
+    if (args.assignments.some(item => item.adjust !== undefined)) {
+      throw new Error(
+        `${monthPath.slice(0, 7)} is not open in YNAB yet, so there is nothing to adjust — ` +
+          'use set (the absolute amount) instead; assigning is what creates the month',
+      );
+    }
+    pool = (await loadCategories(client, args.budgetId)).flat.map(category => ({
+      id: category.id,
+      name: category.name,
+      budgeted: 0,
     }));
+  }
   const changes = planAssignments(pool, args.assignments);
 
   const deltaMilli = changes.reduce((total, change) => total + (change.afterMilli - change.beforeMilli), 0);
-  const rtaMilli = typeof monthRaw.to_be_budgeted === 'number' ? monthRaw.to_be_budgeted : 0;
+  const rtaMilli =
+    monthRaw && typeof monthRaw.to_be_budgeted === 'number' ? monthRaw.to_be_budgeted : 0;
   const summary = {
-    month: String(monthRaw.month ?? '').slice(0, 7),
+    month: String(monthRaw?.month ?? monthIso(args.month)).slice(0, 7),
     changes: changes.map(change => ({
       category: change.name,
       before: change.beforeMilli / 1000,
       after: change.afterMilli / 1000,
     })),
-    ready_to_assign_projected: (rtaMilli - deltaMilli) / 1000,
+    ...(monthRaw
+      ? { ready_to_assign_projected: (rtaMilli - deltaMilli) / 1000 }
+      : { creates_month: true }),
   };
 
   if (args.dryRun) {
