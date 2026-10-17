@@ -108,6 +108,41 @@ worked. It scored 4/5 on the first run; the one failure was the `en`/`gb` bug ab
 After the fix it used `gb` every time, but one of two repeats still overran the call
 budget by re-running the same search.
 
+### Native vs prompted tool calling
+
+`--tool-mode prompted` sends no `tools` parameter. The signatures go into the system
+prompt in the Hermes function-calling format, and calls are parsed out of plain text as
+`<tool_call>{"name", "arguments"}</tool_call>` blocks (`src/evals/hermes-format.ts`),
+with results returned as `<tool_response>` blocks. This is how to evaluate models served
+without native tool calling: every Nous Hermes model on OpenRouter reports
+`tools: false`. Running the same model in both modes also separates the model's tool
+judgement from the provider's tool-calling layer. Calls that can't be parsed (bad JSON,
+missing tags) are counted as `formatErrors` in both modes, and the parse error is fed
+back so the model can retry.
+
+First comparison (Nemotron 3 Super, free, 2026-10-17, one run per case):
+
+| | native | prompted |
+|---|---|---|
+| earliest-dentist | pass | pass |
+| english-gp-public | fail (call budget, before the `gb` fix) | fail: last turn was an untagged tool call, not an answer |
+| dermatologist-hamburg | pass | pass, after recovering from one malformed call |
+| book-request / out-of-scope | pass / pass | not run (free daily cap) |
+
+The prompted run exposed three harness bugs, all fixed:
+- A correct date written with U+2011 hyphens failed the ASCII answer regex; answers are
+  now normalised before matching.
+- An untagged tool call was accepted as the final answer; it is now a format error.
+- The free tier's daily cap was being retried.
+
+A Hermes pass costs about $0.06 to $0.10 (≈17k input and 0.8k output tokens per case):
+```bash
+npm run eval -- --mcp doctolib --model nousresearch/hermes-3-llama-3.1-70b --tool-mode prompted
+```
+
+`--rescore <results.json>` re-applies the current checks to saved traces with no LLM or
+MCP calls. Use it after changing a case or a check, to see how old runs would score.
+
 Use `--repeat`, because tool use varies from run to run, so report pass rates rather than
 one green run. Full traces land in `eval-results/` (gitignored). Comparing models, or a
 tool-description change before and after, on the same cases is how the descriptions get

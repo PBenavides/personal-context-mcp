@@ -37,6 +37,8 @@ export interface Trace {
   answer: string;
   /** Set when the loop ended without an answer (turn limit, API error). */
   aborted?: string;
+  /** Tool calls the model emitted but that could not be parsed (bad JSON, wrong shape). */
+  formatErrors?: string[];
 }
 
 export interface CheckResult {
@@ -59,6 +61,19 @@ function matches(matcher: ArgMatcher, value: unknown): boolean {
     return value.some((v) => String(v).toLowerCase().includes(needle));
   }
   return value !== undefined && String(value).toLowerCase().includes(needle);
+}
+
+// Built from escapes so formatters cannot turn them into invisible literal characters.
+const UNICODE_DASHES = new RegExp('[\\u2010-\\u2015\\u2212]', 'g');
+const UNICODE_SPACES = new RegExp('[\\u00a0\\u2007\\u202f]', 'g');
+
+/**
+ * Models typeset their answers: dates with U+2011 non-breaking hyphens, times with U+202F
+ * narrow no-break spaces. Answer regexes are written in ASCII, so fold those first - otherwise
+ * a correct answer scores as a failure.
+ */
+export function normaliseText(s: string): string {
+  return s.replace(UNICODE_DASHES, '-').replace(UNICODE_SPACES, ' ');
 }
 
 function describeCall(c: ToolCallRecord): string {
@@ -107,12 +122,13 @@ export function scoreTrace(spec: EvalCase, trace: Trace): CheckResult[] {
     });
   }
 
+  const answer = normaliseText(trace.answer);
   for (const pattern of spec.answerMatches ?? []) {
-    const pass = new RegExp(pattern, 'i').test(trace.answer);
+    const pass = new RegExp(pattern, 'i').test(answer);
     results.push({ check: `answer ~ /${pattern}/`, pass });
   }
   for (const pattern of spec.answerNotMatches ?? []) {
-    const pass = !new RegExp(pattern, 'i').test(trace.answer);
+    const pass = !new RegExp(pattern, 'i').test(answer);
     results.push({ check: `answer !~ /${pattern}/`, pass });
   }
 

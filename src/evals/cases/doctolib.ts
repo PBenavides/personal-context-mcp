@@ -31,6 +31,9 @@ export const doctolibCases: EvalCase[] = [
       },
     ],
     maxToolCalls: 4,
+    // Without an answer check, a run that ends on a garbled tool call instead of a reply
+    // passed (seen live in prompted mode).
+    answerMatches: ['doctolib\\.de/'],
   },
   {
     id: 'dermatologist-hamburg',

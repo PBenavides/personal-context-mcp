@@ -56,6 +56,14 @@ describe('scoreTrace', () => {
     ]);
   });
 
+  it('matches dates typeset with non-breaking hyphens (seen live)', () => {
+    const results = scoreTrace(
+      { id: 'd', probes: '', prompt: '', answerMatches: ['20\\d\\d-\\d\\d-\\d\\d'] },
+      trace({ answer: 'First slot: 2026‑10‑17 at 19:15' }),
+    );
+    expect(results.every((r) => r.pass)).toBe(true);
+  });
+
   it('fails "completed" when the loop aborted', () => {
     expect(failures(trace({ aborted: 'turn limit' }))).toContain('completed');
   });
