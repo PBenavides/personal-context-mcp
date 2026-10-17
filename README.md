@@ -1,106 +1,236 @@
 # personal-context-mcp
 
-MCP server exposing Pablo's enriched personal context — Obsidian vault notes
-and activity events, classified by the
-[context-pipeline](../context-pipeline/) into a closed 14-category taxonomy —
-over **streamable HTTP** with **BM25 search**.
+A Fastify host that serves two MCP servers over **streamable HTTP**:
+
+| Route | MCP | What it does |
+|---|---|---|
+| `POST /personal-context` | `personal-context` | Read Pablo's enriched personal context — Obsidian vault notes and activity events, classified by [`context-pipeline`](../context-pipeline/) into a 14-category taxonomy. Semantic search (S3 Vectors) with a BM25 fallback, plus an OWL ontology. |
+| `POST /personal-tools` | `personal-tools` | Act on personal accounts — YNAB, Hevy and Google Calendar. |
 
 ```
-s3://…/context-enriched/  ──(boot load + run_id refresh)──►  in-memory corpus
-                                                                   │
-client ──POST /personal-context (Bearer token)──►  search_context / get_document / list_taxonomy
-client ──POST /personal-tools   (Bearer token)──►  ynab_* / hevy_*  ──►  YNAB + Hevy REST APIs
+s3://…/context-enriched/ ──(loaded at boot, refreshed on new run_id)──► in-memory corpus
+s3 vectors (Titan embeddings) ──────────────────────────────────────────► semantic search
+
+client ──POST /personal-context (Bearer)──► search_context / get_document / list_taxonomy / ontology_*
+client ──POST /personal-tools   (Bearer)──► ynab_* / hevy_* / gcal_*  ──► YNAB, Hevy, Google Calendar APIs
 ```
 
-## Tools (MCP `personal-context`, mounted at `/personal-context`)
+Production runs on a DigitalOcean droplet, reachable only over Tailscale.
 
-| Tool | Purpose |
-|---|---|
-| `search_context({query, category?, status?, horizon?, limit?})` | BM25 over notes + events, filtered by taxonomy metadata; compact hits with `path`, `score`, `category`, `summary`, `snippet`. |
-| `get_document({path, full?})` | Full document (frontmatter + body) or a bounded preview. |
-| `list_taxonomy()` | Categories with document counts + taxonomy/manifest versions. |
-| `ontology_search({query, classes?, limit?, hops?})` | Dense retrieval over the OWL ontology graph + neighborhood expansion (keyword fallback without OpenRouter). |
-| `ontology_update({nodes?, edges?, attributes?, …})` | Schema-validated upsert into the ontology; persists a new immutable RDF version. |
-| `ontology_sync({guidance?, force?})` | Runs the injector on demand (same job as the hourly cron); surfaces + accepts elicitation guidance. |
+## Quick start
 
-The ontology layer (OWL/RDF-XML registry in S3, LLM injector, hourly cron,
-`/visual-ontologies` dashboard) is documented in
-[docs/ontologies.md](docs/ontologies.md).
-
-Details: [docs/personal-context-mcp.md](docs/personal-context-mcp.md). The
-hosting architecture (per-request stateless transport, MCP registry,
-connection layer) is documented in [docs/](docs/).
-
-## Tools (MCP `personal-tools`, mounted at `/personal-tools`)
-
-The action layer: 8 `ynab_*` tools reshaped (2026-09) around the
-one-month-ahead budgeting method — a budget-health overview, transaction /
-category / report reads, an entity lookup, and writes that assign money to
-categories, manage transactions, and reshape categories; everything speaks
-currency units (writes accept "$250.50"-style amounts) and every write takes
-`dry_run` — plus 7 `hevy_*` tools (workout analytics, exercise search, and
-`hevy_write_routine`, which creates when given no id and updates when given
-one, with `dry_run`). Requires `YNAB_TOKEN` / `HEVY_API_KEY`;
-unset keys disable the corresponding tools cleanly. Full surface, design
-rationale, and the Google-integrations status:
-[docs/personal-tools.md](docs/personal-tools.md).
-
-## Run it
+You need **Node ≥ 20**. No credentials are needed for the first run.
 
 ```bash
 npm ci
-npm run dev            # serves the test fixture corpus on :3000, no credentials needed
+npm run dev
 ```
 
-Against the real enriched layer:
+That serves the bundled test corpus (`tests/fixtures/enriched`) on
+**http://localhost:3000** with auth turned off. Check it's up:
 
 ```bash
-CORPUS_SOURCE=s3 CONTEXT_BUCKET=personal-pbenavides CONTEXT_PREFIX=context-enriched/ \
-AWS_PROFILE=personal MCP_BEARER_TOKEN=… npm run dev
+curl localhost:3000/health   # {"status":"ok"}
+curl localhost:3000/         # lists the mounted MCPs
+curl localhost:3000/ready    # which connections are configured / reachable
 ```
 
-Point a client at it:
+Without credentials, search runs in BM25 keyword mode, and the `ynab_*`,
+`hevy_*` and `gcal_*` tools return a clear "not configured" error instead of
+crashing.
+
+## Running with real data and credentials
+
+Copy the env template and fill in only what you need. `.env` is loaded
+automatically and is gitignored. **Never commit it.**
+
+```bash
+cp .env.example .env
+```
+
+| To get… | Set in `.env` |
+|---|---|
+| Auth on the MCP routes (recommended even locally) | `MCP_BEARER_TOKEN` (any string locally) |
+| The real corpus from S3 | `CORPUS_SOURCE=s3`, `CONTEXT_BUCKET=personal-pbenavides`, `AWS_PROFILE=personal` |
+| Semantic search | `VECTOR_BUCKET=personal-context-vectors`, `VECTOR_INDEX=context-notes` (+ AWS creds with Bedrock and S3 Vectors access) |
+| YNAB tools | `YNAB_TOKEN` |
+| Hevy tools | `HEVY_API_KEY` |
+| Google Calendar tools | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALENDAR_REFRESH_TOKEN` — see [docs/personal-tools.md](docs/personal-tools.md#secrets) for minting the token |
+| Ontology injector + embeddings | `OPENROUTER_API_KEY` |
+
+Then `npm run dev` as before. Each credential switches on its own tools; the
+rest of the host is unaffected if one is missing.
+
+Production values live in SSM under `/personal-context/*`. To read one:
+
+```bash
+aws ssm get-parameter --profile personal --region us-east-1 \
+  --name /personal-context/mcp-bearer-token --with-decryption \
+  --query Parameter.Value --output text
+```
+
+## Connecting a client
+
+Claude Code, against your local server:
 
 ```bash
 claude mcp add --transport http personal-context http://localhost:3000/personal-context \
   --header "Authorization: Bearer $MCP_BEARER_TOKEN"
+claude mcp add --transport http personal-tools http://localhost:3000/personal-tools \
+  --header "Authorization: Bearer $MCP_BEARER_TOKEN"
 ```
 
-Shipping a change to production (Terraform root, ECR release, droplet
-deploy, verification): [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+Drop the `--header` if you left `MCP_BEARER_TOKEN` empty. For production, swap
+the URL for `http://100.118.218.44:8090/…` (needs Tailscale) and use the SSM
+token.
 
-## Configuration
+## Debugging with the MCP Inspector
 
-Via `config/*.json` + env overrides (`config/custom-environment-variables.json`).
-See [.env.example](.env.example) for the full list:
+The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) lets you
+call tools by hand and see the raw JSON-RPC requests and responses. It's the
+quickest way to check a tool's schema, its arguments, or why it returns an error.
+
+### In the browser
+
+With `npm run dev` running in another terminal:
+
+```bash
+npx @modelcontextprotocol/inspector
+```
+
+It prints a URL like `http://127.0.0.1:6274?MCP_INSPECTOR_API_TOKEN=…` and
+opens it. In the UI:
+
+1. **Transport:** Streamable HTTP
+2. **URL:** `http://localhost:3000/personal-context` (or `/personal-tools`)
+3. **Header:** `Authorization: Bearer <your MCP_BEARER_TOKEN>`, if you set one
+4. **Connect**, then open **Tools → List Tools**, pick one, fill in the
+   arguments and **Run Tool**
+
+The history pane shows each request and response, which is where error
+messages from the tool handlers appear.
+
+### From the terminal (CLI mode)
+
+Good for quick checks and scripting:
+
+```bash
+URL=http://localhost:3000/personal-context
+AUTH="Authorization: Bearer $MCP_BEARER_TOKEN"
+
+# list the tools and their input schemas
+npx @modelcontextprotocol/inspector --cli $URL --transport http --header "$AUTH" \
+  --method tools/list
+
+# call one
+npx @modelcontextprotocol/inspector --cli $URL --transport http --header "$AUTH" \
+  --method tools/call --tool-name search_context --tool-arg query=knee
+```
+
+### Against production
+
+Same commands, with the droplet's URL over Tailscale and the token from SSM:
+
+```bash
+URL=http://100.118.218.44:8090/personal-tools
+AUTH="Authorization: Bearer $(aws ssm get-parameter --profile personal --region us-east-1 \
+  --name /personal-context/mcp-bearer-token --with-decryption --query Parameter.Value --output text)"
+```
+
+Careful: production `personal-tools` writes go to the real YNAB, Hevy and
+Google accounts, and several of those APIs can't undo a write. Pass
+`dry_run: true` where a tool offers it.
+
+### Other debugging tips
+
+- **`/ready`** shows which connections are configured and reachable. Start
+  there when a tool says "not configured".
+- **`LOG_LEVEL=debug npm run dev`** for verbose logs.
+- **`search_context` returns `mode`**: `semantic` or `keyword`. `keyword` when
+  you expected semantic means the vector index isn't configured or the query
+  to it failed (check the logs).
+- **401** means the `Authorization` header is missing or doesn't match
+  `MCP_BEARER_TOKEN`. **405** on a GET is expected: the transport is
+  stateless and only accepts POST.
+
+## Tests and checks
+
+```bash
+make verify   # typecheck + lint + unit tests + smoke test — the same gate CI runs
+```
+
+Individual steps: `npm run typecheck`, `npm run lint`, `npm test`,
+`make smoke`. The smoke test (`scripts/mcp_smoke.sh`) boots the server on
+:3999 against the fixtures and drives it over real JSON-RPC, so it needs no
+credentials. Unit tests sit next to their source as `*.test.ts` and run
+against fakes, never the network.
+
+## Shipping a change
+
+Nothing lands on `main` except through a PR, and **every merge to `main`
+deploys to production automatically** (build → ECR → roll the droplet
+container → smoke test → auto-rollback on failure). Run `make hooks` once per
+clone to install the pre-push guard against pushing to `main` directly.
+
+Details: [docs/CICD.md](docs/CICD.md) and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+## Tools
+
+### `personal-context`
+
+| Tool | Purpose |
+|---|---|
+| `search_context` | Search notes and events, optionally filtered by `category`, `status` or `horizon`. Semantic when the vector index is configured, BM25 otherwise. |
+| `get_document` | Full document (frontmatter + body) or a bounded preview. |
+| `list_taxonomy` | Categories with document counts and taxonomy/manifest versions. |
+| `ontology_search` | Search the OWL ontology graph, with neighbourhood expansion. |
+| `ontology_update` | Schema-validated upsert into the ontology; saves a new immutable version. |
+| `ontology_sync` | Run the ontology injector on demand (same job as the hourly cron). |
+
+### `personal-tools`
+
+| Family | Tools | Notes |
+|---|---|---|
+| YNAB | `ynab_overview`, `ynab_transactions`, `ynab_categories`, `ynab_report`, `ynab_lookup`, `ynab_assign`, `ynab_write_transaction`, `ynab_write_category` | Built around the one-month-ahead method. Amounts in currency units; every write takes `dry_run`. |
+| Hevy | `hevy_recent_activity`, `hevy_get_workout`, `hevy_routines`, `hevy_body_measurements`, `hevy_calculate_burnt_calories`, `hevy_search_exercise_catalog`, `hevy_write_routine` | Read-only except `hevy_write_routine` (with `dry_run`). |
+| Google Calendar | `gcal_list_calendars`, `gcal_list_events`, `gcal_get_event`, `gcal_create_event`, `gcal_update_event`, `gcal_delete_event`, `gcal_free_busy` | Defaults to the primary calendar. |
+
+## Configuration reference
+
+Config comes from `config/default.json`, overridden by env vars mapped in
+`config/custom-environment-variables.json`. [.env.example](.env.example) lists
+every variable with comments.
 
 | Env | Default | Meaning |
 |---|---|---|
 | `PORT` | `3000` | HTTP port. |
-| `MCP_BEARER_TOKEN` | *(empty = unauthenticated!)* | Static bearer required on MCP routes; `/health`+`/ready` stay open. |
+| `LOG_LEVEL` | `info` | Pino log level. |
+| `MCP_BEARER_TOKEN` | *(empty = no auth!)* | Bearer required on MCP routes. `/health`, `/ready` and `/` stay open. |
 | `CORPUS_SOURCE` | `file` | `file` or `s3`. |
-| `CORPUS_ROOT` | `tests/fixtures/enriched` | Root directory for the `file` source. |
-| `CONTEXT_BUCKET` / `CONTEXT_PREFIX` | — / `context-enriched/` | S3 location for the `s3` source (default AWS credential chain). |
-| `REFRESH_SECONDS` | `300` | Manifest `run_id` re-check interval; `0` disables. |
-| `ONTOLOGY_SOURCE` / `ONTOLOGY_BUCKET` / `ONTOLOGY_PREFIX` | `file` / — / `ontology/` | Where the RDF ontology registry lives (see docs/ontologies.md). |
-| `ONTOLOGY_SYNC_ENABLED` | `false` | Hourly injector cron at minute :00. |
-| `OPENROUTER_API_KEY` | *(empty = injector off, keyword search)* | Secret; `.env` locally, SSM `/personal-context/openrouter-api-key` in prod. |
-| `YNAB_TOKEN` | *(empty = ynab_* tools off)* | Secret; `.env` locally, SSM `/personal-context/ynab-token` in prod (see docs/personal-tools.md). |
-| `HEVY_API_KEY` | *(empty = hevy_* tools off)* | Secret; `.env` locally, SSM `/personal-context/hevy-api-key` in prod (see docs/personal-tools.md). |
+| `CORPUS_ROOT` | `tests/fixtures/enriched` | Directory for the `file` source. |
+| `CONTEXT_BUCKET` / `CONTEXT_PREFIX` | — / `context-enriched/` | S3 location for the `s3` source. |
+| `REFRESH_SECONDS` | `300` | How often to check the manifest for a new run; `0` disables. |
+| `VECTOR_BUCKET` / `VECTOR_INDEX` | *(empty = BM25 only)* | S3 Vectors index for semantic search. |
+| `EMBED_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Bedrock model used to embed queries. |
+| `AWS_REGION` | `us-east-1` | Region for S3, S3 Vectors and Bedrock. |
+| `ONTOLOGY_SOURCE` / `ONTOLOGY_ROOT` / `ONTOLOGY_BUCKET` / `ONTOLOGY_PREFIX` | `file` / `data/ontology` / — / `ontology/` | Where the ontology registry lives. |
+| `ONTOLOGY_SYNC_ENABLED` | `false` | Hourly injector cron. |
+| `OPENROUTER_API_KEY` | *(empty = injector off)* | Secret. |
+| `YNAB_TOKEN` | *(empty = `ynab_*` off)* | Secret. |
+| `HEVY_API_KEY` | *(empty = `hevy_*` off)* | Secret. |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_CALENDAR_REFRESH_TOKEN` | *(any empty = `gcal_*` off)* | Secrets. |
 
-## Verify
+All secrets come from `.env` locally and from SSM `/personal-context/*` in
+production.
 
-```bash
-make verify   # typecheck + lint + jest + template-scrub grep + streamable-HTTP smoke test
-```
+## Where to read next
 
-`scripts/mcp_smoke.sh` starts the server against fixtures (or targets
-`MCP_URL`) and asserts the `initialize` → `tools/list` → `tools/call
-search_context` flow end to end — Workstream F reuses it with the production
-URL and real token.
-
-## Deploy (Workstream E hook)
-
-`make build` produces the Docker image; the container reads everything from
-env (see above), serves `/health` for probes, and needs only S3 read access to
-the enriched prefix (task role or `AWS_*` keys).
+| Doc | Covers |
+|---|---|
+| [AGENTS.md](AGENTS.md) | Directory map and coding conventions. |
+| [docs/mcp-registry.md](docs/mcp-registry.md) | Adding a new MCP. |
+| [docs/connections.md](docs/connections.md) | Adding an external dependency. |
+| [docs/personal-context-mcp.md](docs/personal-context-mcp.md) | Corpus MCP: tools, search, corpus shape. |
+| [docs/personal-tools.md](docs/personal-tools.md) | YNAB / Hevy / Calendar tools and their secrets. |
+| [docs/ontologies.md](docs/ontologies.md) | The OWL ontology layer. |
+| [docs/server-and-hosting.md](docs/server-and-hosting.md) | App assembly, config, auth, management routes. |
