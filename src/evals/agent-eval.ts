@@ -73,15 +73,25 @@ async function chat(
   tools: unknown[],
 ): Promise<{ message: ChatMessage; usage?: Usage }> {
   const base = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
-  const res = await fetch(`${base}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      'Content-Type': 'application/json',
-      'X-Title': 'personal-context-mcp agent eval',
-    },
-    body: JSON.stringify({ model, messages, tools, temperature: 0 }),
-  });
+  let res: Response;
+  // Free models are rate-limited: back off on 429 instead of failing the case.
+  for (let attempt = 0; ; attempt++) {
+    res = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'X-Title': 'personal-context-mcp agent eval',
+      },
+      body: JSON.stringify({ model, messages, tools, temperature: 0 }),
+    });
+    if (res.status !== 429 || attempt >= 4) {
+      break;
+    }
+    const wait = Number(res.headers.get('retry-after')) * 1000 || 5000 * 2 ** attempt;
+    console.log(`        (rate limited, retrying in ${Math.round(wait / 1000)}s)`);
+    await new Promise((r) => setTimeout(r, wait));
+  }
   if (!res.ok) {
     throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 300)}`);
   }
