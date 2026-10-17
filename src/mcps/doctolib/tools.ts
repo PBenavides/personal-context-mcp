@@ -10,8 +10,8 @@ import type { DoctolibClient, DoctolibCountry } from '../../connections/doctolib
  *   GET  /availabilities.json                                               -> open slots
  *
  * Each search hit already carries the (visit motive, agendas, practice) triple that
- * availabilities needs, so find_earliest_appointment chains them without a per-practitioner
- * profile lookup.
+ * availabilities needs, so doctolibSearch chains them without a per-practitioner profile
+ * lookup; doctolibPractitioner derives the same triple from a profile's agendas.
  */
 
 /**
@@ -42,13 +42,19 @@ export const SPECIALTY_SLUGS: Record<string, string> = {
   physiotherapie: 'physiotherapist',
 };
 
+/** `zahnmedizin (dentist), hautarzt (dermatologist), …` — for tool descriptions and hints. */
+export const SPECIALTY_GUIDE = Object.entries(SPECIALTY_SLUGS)
+  .map(([slug, meaning]) => `${slug} (${meaning})`)
+  .join(', ');
+
+// The slug list rides along in the hint, so recovering from a miss costs no extra call.
 const ZERO_HITS_HINT =
   'No results. Doctolib only matches its own specialty slugs and returns nothing for other ' +
-  'spellings: try list_specialties, or a nearby term.';
+  `spellings. Verified slugs: ${SPECIALTY_GUIDE}.`;
 
 /** Doctolib serves about two weeks per availabilities call; longer horizons walk start_date. */
 export const MAX_DAYS_PER_CALL = 15;
-/** Concurrent availability probes in find_earliest_appointment. */
+/** Concurrent availability probes (search fan-out, multi-place practitioners). */
 const FAN_OUT = 4;
 
 export interface SearchFilters {
@@ -88,8 +94,9 @@ function obj(value: unknown): Json {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Json) : {};
 }
 
+/** Non-empty trimmed string or null — Doctolib names carry stray trailing spaces. */
 function str(value: unknown): string | null {
-  return typeof value === 'string' && value ? value : null;
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 function num(value: unknown): number | null {
@@ -171,13 +178,6 @@ export function normaliseProvider(raw: unknown, baseUrl: string): Provider {
   };
 }
 
-export function listSpecialties(): { specialties: Record<string, string>; note: string } {
-  return {
-    specialties: SPECIALTY_SLUGS,
-    note: 'Verified on doctolib.de. Other slugs may exist; an unrecognised one returns zero results.',
-  };
-}
-
 export async function searchDoctors(
   client: DoctolibClient,
   args: { specialty: string; city: string; country: DoctolibCountry; page?: number } & SearchFilters,
@@ -235,7 +235,7 @@ export async function getPractitioner(
     profile_url: redirect ? `${client.baseUrl(args.country)}${redirect}` : null,
     visit_motives: list(d.visit_motives).map((m) => ({
       id: m.id,
-      name: m.name,
+      name: str(m.name),
       telehealth: m.telehealth,
       allow_new_patients: m.allow_new_patients,
     })),
@@ -246,9 +246,9 @@ export async function getPractitioner(
     })),
     places: list(d.places).map((p) => ({
       id: p.id,
-      name: p.name,
-      address: p.address,
-      city: p.city,
+      name: str(p.name),
+      address: str(p.address),
+      city: str(p.city),
       practice_ids: p.practice_ids,
     })),
   };
@@ -330,27 +330,115 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
   return results;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The tool surface. Two intent-level tools sit on the building blocks above:
+//
+//   doctolibSearch        "who, and when is the soonest slot?"  (search ± availability)
+//   doctolibPractitioner  "tell me about this one / when can I see them for X?"
+//
+// Responses are shaped for a model to read: slots as {date: ["HH:MM", …]}, no internal ids
+// (agendas, practices) the caller never needs to pass back, and no null fields.
+// ---------------------------------------------------------------------------------------------
+
+/** Days and times shown per search result: enough to compare practices, not a full calendar. */
+const SEARCH_PREVIEW_DAYS = 3;
+const SEARCH_PREVIEW_TIMES = 6;
+/** A practitioner's availability shows every day in the window, capped per day. */
+const PROFILE_TIMES_PER_DAY = 12;
+
+function isEmpty(v: unknown): boolean {
+  if (v === null || v === undefined) {
+    return true;
+  }
+  if (Array.isArray(v)) {
+    return v.length === 0;
+  }
+  return typeof v === 'object' && Object.keys(v as object).length === 0;
+}
+
+/** Drop null, undefined and empty array/object fields so results carry only what is known. */
+function compact<T extends Json>(o: T): Partial<T> {
+  return Object.fromEntries(Object.entries(o).filter(([, v]) => !isEmpty(v))) as Partial<T>;
+}
+
+/** `2026-10-17T18:45:00.000+02:00` -> `2026-10-17 18:45`, in the practice's own local time. */
+export function formatSlot(iso: string): string {
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
+}
+
+/** `[{date, slots}]` -> `{date: ["HH:MM", …]}`, at most `maxDays` days and `maxTimes` each. */
+export function slotsByDay(days: Slot[], maxDays: number, maxTimes: number): Record<string, string[]> {
+  return Object.fromEntries(
+    days
+      .slice(0, maxDays)
+      .map((d) => [d.date, d.slots.slice(0, maxTimes).map((s) => slotTime(s).slice(11, 16))]),
+  );
+}
+
+function address(p: Provider): string | null {
+  const cityLine = [p.zipcode, p.city].filter(Boolean).join(' ');
+  return [p.address, cityLine].filter(Boolean).join(', ') || null;
+}
+
+function errorText(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 160);
+}
+
+/** One search hit, as the caller sees it: who, where, which motive, and how to follow up. */
+function presentProvider(p: Provider): Json {
+  return compact({
+    name: p.name,
+    speciality: p.speciality,
+    address: address(p),
+    languages: p.languages,
+    telehealth: p.telehealth || null,
+    new_patients: p.accepts_new_patients,
+    bookable_online: p.bookable_online ? null : false,
+    motive: p.visit_motive_name,
+    motive_id: p.visit_motive_id,
+    profile_slug: p.profile_slug,
+    booking_url: p.profile_url,
+  });
+}
+
 /**
- * Search, then probe each bookable hit's availability and return the soonest slots first.
- * This is the tool worth having: the website makes you open practitioners one at a time.
- * A probe that fails is counted in `errors` instead of failing the whole search.
+ * Search practitioners and, by default, check each one's open slots, soonest first. With
+ * `availability: false` it is a plain paged search. A failed probe is counted in
+ * `probe_errors` instead of failing the whole search.
  */
-export async function findEarliestAppointment(
+export async function doctolibSearch(
   client: DoctolibClient,
   args: {
     specialty: string;
     city: string;
     country: DoctolibCountry;
+    availability?: boolean;
     withinDays?: number;
     limit?: number;
-    scan?: number;
+    page?: number;
   } & SearchFilters,
 ): Promise<Json> {
   const found = await searchDoctors(client, args);
-  const candidates = found.providers
-    .filter((p) => p.visit_motive_id !== null && p.agenda_ids.length && p.practice_id !== null)
-    .slice(0, args.scan ?? 20);
+  const limit = args.limit ?? 10;
+  const head = compact({
+    specialty: args.specialty,
+    city: args.city,
+    total_matching: found.total,
+    hint: found.hint,
+  });
 
+  if (args.availability === false) {
+    return {
+      ...head,
+      page: found.page,
+      results: found.providers.slice(0, limit).map(presentProvider),
+    };
+  }
+
+  // Probe every bookable hit on the page; `limit` only trims what is returned.
+  const candidates = found.providers.filter(
+    (p) => p.visit_motive_id !== null && p.agenda_ids.length && p.practice_id !== null,
+  );
   const probed = await mapLimit(candidates, FAN_OUT, async (p) => {
     try {
       const av = await getAvailabilities(client, {
@@ -360,46 +448,118 @@ export async function findEarliestAppointment(
         days: args.withinDays ?? 14,
         country: args.country,
       });
-      return {
-        ...p,
-        first_slot: av.first_slot,
-        slot_count: av.total,
-        days_with_slots: av.days_with_slots.slice(0, 3),
-        reason: av.reason,
-      };
+      return { p, av };
     } catch (error) {
-      return {
-        ...p,
-        first_slot: null,
-        error: (error instanceof Error ? error.message : String(error)).slice(0, 160),
-      };
+      return { p, error: errorText(error) };
     }
   });
 
   const withSlots = probed
-    .filter((p) => p.first_slot)
+    .filter((r) => r.av?.first_slot)
     // Compare instants, not strings: slots carry UTC offsets that differ across DST.
-    .sort((a, b) => Date.parse(a.first_slot as string) - Date.parse(b.first_slot as string));
+    .sort((a, b) => Date.parse(a.av?.first_slot as string) - Date.parse(b.av?.first_slot as string));
   return {
-    searched: candidates.length,
+    ...head,
+    checked: candidates.length,
     with_availability: withSlots.length,
-    errors: probed.filter((p) => 'error' in p).length,
-    total_matching_practitioners: found.total,
-    results: withSlots.slice(0, args.limit ?? 10),
-    ...(found.hint ? { hint: found.hint } : {}),
+    ...(probed.some((r) => r.error) ? { probe_errors: probed.filter((r) => r.error).length } : {}),
+    results: withSlots.slice(0, limit).map(({ p, av }) => ({
+      ...presentProvider(p),
+      next_slot: formatSlot(av?.first_slot as string),
+      slots_in_window: av?.total,
+      slots: slotsByDay(av?.days_with_slots ?? [], SEARCH_PREVIEW_DAYS, SEARCH_PREVIEW_TIMES),
+    })),
   };
 }
 
-/** The URL a human opens to book in a browser — the safe handoff; commits nothing. */
-export async function bookingUrl(
+/**
+ * One practitioner: visit motives, places and the booking link, plus — when `visitMotiveId`
+ * is given — that motive's open slots. The agendas and practices the availability call needs
+ * are derived from the profile, so the caller only ever passes the motive id; a motive offered
+ * at several places is checked at each.
+ */
+export async function doctolibPractitioner(
   client: DoctolibClient,
-  args: { profileSlug: string; country: DoctolibCountry },
-): Promise<{ name: unknown; booking_url: string; note: string }> {
-  const p = await getPractitioner(client, args);
-  return {
-    name: p.name,
-    booking_url:
-      (p.profile_url as string | null) ?? `${client.baseUrl(args.country)}/booking/${args.profileSlug}`,
-    note: 'Open in a browser and complete the booking there.',
-  };
+  args: {
+    profileSlug: string;
+    country: DoctolibCountry;
+    visitMotiveId?: number;
+    startDate?: string;
+    days?: number;
+  },
+): Promise<Json> {
+  const prof = await getPractitioner(client, args);
+  const motives = prof.visit_motives as Json[];
+  const agendas = prof.agendas as { id: unknown; practice_id: unknown; visit_motive_ids: unknown }[];
+  const places = prof.places as Json[];
+  const placeFor = (practiceId: unknown): Json | undefined =>
+    places.find((pl) => Array.isArray(pl.practice_ids) && pl.practice_ids.includes(practiceId));
+
+  const out: Json = compact({
+    name: prof.name,
+    speciality: prof.speciality,
+    booking_url: prof.profile_url ?? `${client.baseUrl(args.country)}/booking/${args.profileSlug}`,
+    telehealth: prof.telehealth_enabled || null,
+    places: places.map((pl) => compact({ name: pl.name, address: pl.address, city: pl.city })),
+    motives: motives.map((m) =>
+      compact({
+        id: m.id,
+        name: m.name,
+        telehealth: m.telehealth || null,
+        new_patients: m.allow_new_patients,
+      }),
+    ),
+  });
+  if (args.visitMotiveId === undefined) {
+    return out;
+  }
+
+  const motive = motives.find((m) => m.id === args.visitMotiveId);
+  if (!motive) {
+    throw new Error(
+      `visit motive ${args.visitMotiveId} is not offered by ${args.profileSlug}; ` +
+        `offered: ${motives.map((m) => `${m.id} (${m.name})`).join(', ')}`,
+    );
+  }
+  // Group the motive's agendas by practice: availabilities.json takes one practice per call.
+  const byPractice = new Map<number, number[]>();
+  for (const a of agendas) {
+    if (
+      Array.isArray(a.visit_motive_ids) &&
+      a.visit_motive_ids.includes(args.visitMotiveId) &&
+      typeof a.id === 'number' &&
+      typeof a.practice_id === 'number'
+    ) {
+      byPractice.set(a.practice_id, [...(byPractice.get(a.practice_id) ?? []), a.id]);
+    }
+  }
+  if (!byPractice.size) {
+    return { ...out, availability: { motive: motive.name, note: 'no online agenda for this motive' } };
+  }
+
+  const perPlace = await mapLimit([...byPractice], FAN_OUT, async ([practiceId, agendaIds]) => {
+    const where = placeFor(practiceId);
+    const label = (str(where?.name) ?? str(where?.address) ?? `practice ${practiceId}`) as string;
+    try {
+      const av = await getAvailabilities(client, {
+        visitMotiveId: args.visitMotiveId as number,
+        agendaIds,
+        practiceId,
+        startDate: args.startDate,
+        days: args.days,
+        country: args.country,
+      });
+      return compact({
+        place: label,
+        next_slot: av.first_slot ? formatSlot(av.first_slot) : null,
+        slots_in_window: av.total,
+        // Keep the distinction from "fully booked": the practice has not opened that far yet.
+        reason: av.reason,
+        slots: slotsByDay(av.days_with_slots, Number.MAX_SAFE_INTEGER, PROFILE_TIMES_PER_DAY),
+      });
+    } catch (error) {
+      return { place: label, error: errorText(error) };
+    }
+  });
+  return { ...out, availability: { motive: motive.name, places: perPlace } };
 }

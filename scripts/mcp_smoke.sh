@@ -94,7 +94,7 @@ echo "smoke: get_document OK"
 # 6. doctolib MCP is mounted — tools/list only, so the smoke never calls doctolib.de
 DOCTOLIB_URL="${MCP_URL%/*}/doctolib"
 dtools=$(MCP_URL="$DOCTOLIB_URL" rpc '{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}')
-for tool in find_earliest_appointment search_doctors get_availabilities booking_url; do
+for tool in doctolib_search doctolib_practitioner; do
   echo "$dtools" | grep -q "\"$tool\"" || fail "doctolib tools/list missing $tool"
 done
 echo "smoke: doctolib tools/list OK"

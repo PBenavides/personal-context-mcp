@@ -68,6 +68,19 @@ describe('scoreTrace', () => {
     expect(failures(trace({ aborted: 'turn limit' }))).toContain('completed');
   });
 
+  it('{ present: true } matches any given value, and only a given one', () => {
+    const presentSpec: EvalCase = {
+      id: 'p',
+      probes: '',
+      prompt: '',
+      expectCalls: [{ tool: 'p', args: { visit_motive_id: { present: true } } }],
+    };
+    const call = (args: Record<string, unknown>): Trace =>
+      trace({ calls: [{ tool: 'p', args, isError: false, ms: 1 }] });
+    expect(scoreTrace(presentSpec, call({ visit_motive_id: 12701178 }))[1].pass).toBe(true);
+    expect(scoreTrace(presentSpec, call({}))[1].pass).toBe(false);
+  });
+
   it('treats "*" as forbidding every tool', () => {
     const results = scoreTrace(
       { id: 'o', probes: '', prompt: '', forbidTools: ['*'] },
@@ -79,14 +92,7 @@ describe('scoreTrace', () => {
 
 describe('doctolib cases', () => {
   it('only name tools the doctolib MCP exposes', () => {
-    const tools = new Set([
-      'list_specialties',
-      'find_earliest_appointment',
-      'search_doctors',
-      'get_practitioner',
-      'get_availabilities',
-      'booking_url',
-    ]);
+    const tools = new Set(['doctolib_search', 'doctolib_practitioner']);
     expect(doctolibCases.flatMap((c) => unknownTools(c, tools))).toEqual([]);
   });
 });

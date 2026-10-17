@@ -1,11 +1,12 @@
 import type { DoctolibClient, GeocodeHit } from '../../connections/doctolib.js';
 import {
-  bookingUrl,
-  findEarliestAppointment,
+  doctolibPractitioner,
+  doctolibSearch,
+  formatSlot,
   getAvailabilities,
-  getPractitioner,
   normaliseProvider,
   searchDoctors,
+  slotsByDay,
 } from './tools.js';
 
 // Payload shapes follow esinecan/doctolib-mcp's recorded fixtures.
@@ -130,7 +131,8 @@ describe('searchDoctors zero hits', () => {
       fakeClient(() => ({ total: 0, healthcareProviders: [] })),
       { specialty: 'zahnarzt', city: 'Berlin', country: 'de' },
     );
-    expect(out.hint).toMatch(/list_specialties/);
+    // The verified slugs ride along, so recovering costs no extra tool call.
+    expect(out.hint).toMatch(/zahnmedizin \(dentist\)/);
   });
 });
 
@@ -174,22 +176,70 @@ describe('getAvailabilities', () => {
   });
 });
 
-describe('findEarliestAppointment', () => {
-  it('probes only complete triples and sorts by earliest slot', async () => {
-    const slots: Record<number, string> = {
-      901: '2026-08-12T09:00:00.000+02:00',
-      808: '2026-08-10T15:00:00.000+02:00',
-    };
-    const client = fakeClient((call) => {
-      if (call.path.includes('/hcp/search')) {
-        return SEARCH;
-      }
-      const at = slots[Number(call.params?.practice_ids)];
-      return { total: 1, availabilities: [{ date: at.slice(0, 10), slots: [at] }] };
+describe('slot formatting', () => {
+  it('keeps the practice-local date and time', () => {
+    expect(formatSlot('2026-10-17T18:45:00.000+02:00')).toBe('2026-10-17 18:45');
+  });
+
+  it('groups times by day, capped', () => {
+    const days = [
+      {
+        date: '2026-10-17',
+        slots: ['2026-10-17T09:00:00.000+02:00', { start_date: '2026-10-17T09:30:00.000+02:00' }],
+      },
+      { date: '2026-10-18', slots: ['2026-10-18T10:00:00.000+02:00'] },
+    ];
+    expect(slotsByDay(days, 1, 1)).toEqual({ '2026-10-17': ['09:00'] });
+    expect(slotsByDay(days, 5, 5)).toEqual({ '2026-10-17': ['09:00', '09:30'], '2026-10-18': ['10:00'] });
+  });
+});
+
+describe('doctolibSearch', () => {
+  const slots: Record<number, string> = {
+    901: '2026-08-12T09:00:00.000+02:00',
+    808: '2026-08-10T15:00:00.000+02:00',
+  };
+  const withSlots = (call: Call): unknown => {
+    if (call.path.includes('/hcp/search')) {
+      return SEARCH;
+    }
+    const at = slots[Number(call.params?.practice_ids)];
+    return { total: 1, availabilities: [{ date: at.slice(0, 10), slots: [at] }] };
+  };
+
+  it('probes only complete triples, sorts by earliest, and returns compact results', async () => {
+    const out = await doctolibSearch(fakeClient(withSlots), {
+      specialty: 'x',
+      city: 'Berlin',
+      country: 'de',
     });
-    const out = await findEarliestAppointment(client, { specialty: 'x', city: 'Berlin', country: 'de' });
-    expect(out.searched).toBe(2); // the third hit has no agendas/practice
-    expect((out.results as { practice_id: number }[]).map((r) => r.practice_id)).toEqual([808, 901]);
+    expect(out).toMatchObject({ total_matching: 3, checked: 2, with_availability: 2 });
+    const results = out.results as Record<string, unknown>[];
+    expect(results.map((r) => r.name)).toEqual(['Schmidt', 'Anna Müller']);
+    expect(results[0]).toMatchObject({
+      next_slot: '2026-08-10 15:00',
+      slots: { '2026-08-10': ['15:00'] },
+      profile_slug: 'dr-schmidt',
+      motive_id: 66001,
+      booking_url: 'https://www.doctolib.de/zahnarzt/dr-schmidt/',
+    });
+    // Internal ids the caller never passes back are not exposed; unknown fields are dropped.
+    expect(results[0]).not.toHaveProperty('agenda_ids');
+    expect(results[0]).not.toHaveProperty('practice_id');
+    expect(results[0]).not.toHaveProperty('languages');
+  });
+
+  it('availability: false is a plain list with no slot calls', async () => {
+    const client = fakeClient(withSlots);
+    const out = await doctolibSearch(client, {
+      specialty: 'x',
+      city: 'Berlin',
+      country: 'de',
+      availability: false,
+    });
+    expect(client.calls).toHaveLength(1);
+    expect((out.results as unknown[]).length).toBe(3);
+    expect(out).not.toHaveProperty('checked');
   });
 
   it('counts a failed probe instead of failing the search', async () => {
@@ -199,12 +249,12 @@ describe('findEarliestAppointment', () => {
       }
       throw new Error('HTTP 500');
     });
-    const out = await findEarliestAppointment(client, { specialty: 'x', city: 'Berlin', country: 'de' });
-    expect(out).toMatchObject({ searched: 2, with_availability: 0, errors: 2 });
+    const out = await doctolibSearch(client, { specialty: 'x', city: 'Berlin', country: 'de' });
+    expect(out).toMatchObject({ checked: 2, with_availability: 0, probe_errors: 2, results: [] });
   });
 });
 
-describe('getPractitioner / bookingUrl', () => {
+describe('doctolibPractitioner', () => {
   const INFO = {
     data: {
       profile: {
@@ -213,37 +263,97 @@ describe('getPractitioner / bookingUrl', () => {
         subtitle: 'Allgemeinmedizin',
         redirect_url: '/medecin/dr-anna-mueller',
       },
-      visit_motives: [{ id: 55012, name: 'Akutsprechstunde', telehealth: false, allow_new_patients: true }],
-      agendas: [{ id: 101, practice_id: 901, visit_motive_ids: [55012] }],
+      visit_motives: [
+        { id: 55012, name: 'Akutsprechstunde', telehealth: false, allow_new_patients: true },
+        { id: 55013, name: 'Vorsorgeuntersuchung', telehealth: false, allow_new_patients: true },
+      ],
+      agendas: [
+        { id: 101, practice_id: 901, visit_motive_ids: [55012, 55013] },
+        { id: 301, practice_id: 901, visit_motive_ids: [55012] },
+        { id: 401, practice_id: 902, visit_motive_ids: [55012] },
+      ],
       places: [
         { id: 901, name: 'Praxis Kantstraße', address: 'Kantstr. 12', city: 'Berlin', practice_ids: [901] },
+        { id: 902, name: 'Filiale', address: 'Wilmersdorfer Str. 50', city: 'Berlin', practice_ids: [902] },
       ],
     },
   };
+  const client = (): ReturnType<typeof fakeClient> =>
+    fakeClient((call) =>
+      call.path.includes('info.json')
+        ? INFO
+        : {
+            total: 1,
+            availabilities: [
+              {
+                date: '2026-08-11',
+                slots: [`2026-08-11T0${call.params?.practice_ids === 901 ? 8 : 9}:15:00.000+02:00`],
+              },
+            ],
+          },
+    );
 
-  it('shapes the slot-selection info payload', async () => {
-    const client = fakeClient(() => INFO);
-    const p = await getPractitioner(client, { profileSlug: 'dr-anna-mueller', country: 'de' });
-    expect(client.calls[0].params).toEqual({ profile_slug: 'dr-anna-mueller', locale: 'de' });
-    expect(p).toMatchObject({ profile_id: 554433, name: 'Dr. Anna Müller', visit_motives: [{ id: 55012 }] });
+  it('returns profile, motives, places and the booking link, with no slot calls', async () => {
+    const c = client();
+    const out = await doctolibPractitioner(c, { profileSlug: 'dr-anna-mueller', country: 'de' });
+    expect(c.calls).toHaveLength(1);
+    expect(c.calls[0].params).toEqual({ profile_slug: 'dr-anna-mueller', locale: 'de' });
+    expect(out).toMatchObject({
+      name: 'Dr. Anna Müller',
+      booking_url: 'https://www.doctolib.de/medecin/dr-anna-mueller',
+      motives: [{ id: 55012, name: 'Akutsprechstunde', new_patients: true }, { id: 55013 }],
+      places: [{ name: 'Praxis Kantstraße' }, { name: 'Filiale' }],
+    });
+    expect(out).not.toHaveProperty('availability');
+  });
+
+  it('derives agendas per practice from the motive and checks each place', async () => {
+    const c = client();
+    const out = await doctolibPractitioner(c, {
+      profileSlug: 'dr-anna-mueller',
+      country: 'de',
+      visitMotiveId: 55012,
+      startDate: '2026-08-11',
+      days: 5,
+    });
+    const slotCalls = c.calls.filter((x) => x.path === '/availabilities.json');
+    expect(slotCalls.map((x) => [x.params?.practice_ids, x.params?.agenda_ids, x.params?.limit])).toEqual([
+      [901, '101-301', 5],
+      [902, '401', 5],
+    ]);
+    expect(out.availability).toEqual({
+      motive: 'Akutsprechstunde',
+      places: [
+        {
+          place: 'Praxis Kantstraße',
+          next_slot: '2026-08-11 08:15',
+          slots_in_window: 1,
+          slots: { '2026-08-11': ['08:15'] },
+        },
+        {
+          place: 'Filiale',
+          next_slot: '2026-08-11 09:15',
+          slots_in_window: 1,
+          slots: { '2026-08-11': ['09:15'] },
+        },
+      ],
+    });
+  });
+
+  it('names the offered motives when asked for one the profile does not have', async () => {
+    await expect(
+      doctolibPractitioner(client(), { profileSlug: 'dr-anna-mueller', country: 'de', visitMotiveId: 1 }),
+    ).rejects.toThrow(/offered: 55012 \(Akutsprechstunde\), 55013/);
   });
 
   it('appends the slug when redirect_url is only the specialty/city listing', async () => {
     const listing = {
       data: { ...INFO.data, profile: { ...INFO.data.profile, redirect_url: '/zahnmedizin/berlin' } },
     };
-    const out = await bookingUrl(
+    const out = await doctolibPractitioner(
       fakeClient(() => listing),
       { profileSlug: 'dr-anna-mueller', country: 'de' },
     );
     expect(out.booking_url).toBe('https://www.doctolib.de/zahnmedizin/berlin/dr-anna-mueller');
-  });
-
-  it('returns the profile URL as the booking link', async () => {
-    const out = await bookingUrl(
-      fakeClient(() => INFO),
-      { profileSlug: 'dr-anna-mueller', country: 'de' },
-    );
-    expect(out.booking_url).toBe('https://www.doctolib.de/medecin/dr-anna-mueller');
   });
 });

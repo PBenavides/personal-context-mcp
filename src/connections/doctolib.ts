@@ -81,7 +81,7 @@ export function createDoctolibConnection(
   ) as DoctolibCountry;
 
   // Per-host throttle. Each caller reserves the next free slot synchronously, so concurrent
-  // fan-out (find_earliest_appointment) still spaces its requests out.
+  // fan-out (doctolib_search's availability probes) still spaces its requests out.
   const nextSlot = new Map<string, number>();
   async function throttle(host: string): Promise<void> {
     const now = Date.now();

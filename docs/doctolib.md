@@ -5,19 +5,36 @@ TypeScript port of the read path of
 [esinecan/doctolib-mcp](https://github.com/esinecan/doctolib-mcp) (Python), rebuilt on
 this host's connection + MCP registry pattern.
 
-**Read-only.** Nothing here books or cancels. The way to book is `booking_url`: the
+**Read-only.** Nothing here books or cancels. Every result carries a `booking_url`: the
 user opens it and finishes in a browser.
 
 ## Tools
 
-| Tool | What it does |
+Two intent-level tools, the same consolidation the YNAB and Hevy surfaces went through:
+filters are parameters, and the presence of an argument decides how much comes back.
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `doctolib_search` | `specialty`, `city?` (Berlin), `availability?` (true), `within_days?` (14), `insurance_sector?`, `languages?`, `telehealth?`, `limit?` (10), `page?`, `country?` | Practitioners for a specialty in a city. By default it probes each bookable hit's slots (4 at a time) and returns them soonest first, each with `next_slot`, a 3-day preview of times, `booking_url`, `profile_slug` and `motive_id`. `availability: false` is the plain paged list. |
+| `doctolib_practitioner` | `profile_slug`, `visit_motive_id?`, `start_date?`, `days?`, `country?` | One profile: visit motives with ids, places, `booking_url`. With `visit_motive_id`, that motive's slots per place and day for any window. The agendas and practice the slot call needs are derived from the profile. |
+
+What became of the first version's six tools:
+
+| Before | Now |
 |---|---|
-| `find_earliest_appointment` | The main tool. Searches a specialty in a city, probes each hit's availability (4 at a time, up to `scan`), returns soonest first. |
-| `search_doctors` | Search without availability. Each hit carries `visit_motive_id`, `agenda_ids`, `practice_id` and `profile_slug`. |
-| `get_practitioner` | All visit motives / agendas / places for a profile, for when search matched the wrong motive. |
-| `get_availabilities` | Slots for one motive/agenda/practice triple, walked in ≤15-day windows. |
-| `list_specialties` | Specialty slugs verified against the live API. |
-| `booking_url` | The profile page a human books from. |
+| `find_earliest_appointment` | `doctolib_search` (default) |
+| `search_doctors` | `doctolib_search` with `availability: false` |
+| `list_specialties` | the verified slugs are in `specialty`'s description, and in the zero-hit `hint` |
+| `get_practitioner` | `doctolib_practitioner` |
+| `get_availabilities` | `doctolib_practitioner` with `visit_motive_id` (no agenda or practice ids to pass) |
+| `booking_url` | `booking_url` field on every search result and profile |
+
+Responses are shaped for a model to read. Slots come as `{"2026-10-17": ["18:45", …]}`
+in the practice's local time, internal ids (agendas, practices) are not exposed, and
+empty fields are dropped. Measured live on 2026-10-17 against the six-tool version: tool
+schemas went from 9.6k to 5.1k characters, ten earliest dentists from 25.4k to 9.0k, and
+a profile from 2.0k to 1.2k. Models also skip the `list_specialties` lookup and the
+`booking_url` follow-up that the eval traces showed in most runs.
 
 ## How it reaches Doctolib
 
@@ -46,12 +63,14 @@ These were all found against the live API while validating with MCP Inspector.
   `total: 0`, not an error. There is no pattern: `urologie` and `radiologe` work, but
   `urologe` and `radiologie` do not. Upstream's list had 10 of 15 slugs returning zero
   (`zahnarzt`, `dermatologe`, `augenarzt`, `gynakologe`, `kardiologe`, …). `SPECIALTY_SLUGS` in
-  `tools.ts` lists only slugs probed on 2026-10-17, and a zero-hit search returns a `hint`
-  pointing at `list_specialties`, so an agent retries instead of reporting "no doctors".
+  `tools.ts` lists only slugs probed on 2026-10-17. They are in the tool schema, and a
+  zero-hit search returns a `hint` that lists them, so an agent retries instead of
+  reporting "no doctors".
   The old autocomplete endpoint (`/api/searchbar/autocomplete.json`) answers `410`.
 - **`redirect_url` is not the profile.** `info.json` returns the specialty/city listing
   (`/zahnmedizin/berlin`). The profile is that plus the slug. Upstream's `booking_url`
-  links to the listing; this one appends the slug.
+  links to the listing; `doctolib_practitioner` appends the slug.
+- **Names carry stray whitespace** ("…durch Oberarzt "), so they are trimmed.
 - **English is `gb`, not `en`.** The language filter takes flag-style codes: on
   2026-10-17, public GPs in Berlin returned 0 with `en` and 464 with `gb`. The agent
   eval caught this because the original tool description said `"en"`. The description
@@ -80,9 +99,12 @@ integrations.
 
 ```bash
 npx @modelcontextprotocol/inspector --cli http://localhost:3000/doctolib --transport http \
-  --method tools/call --tool-name find_earliest_appointment \
+  --method tools/call --tool-name doctolib_search \
   --tool-arg specialty=zahnmedizin --tool-arg city=Berlin --tool-arg limit=3
 ```
+
+Then `doctolib_practitioner` with a result's `profile_slug`, and again with one of its
+motive ids as `visit_motive_id`.
 
 ## Agent evals
 
@@ -91,8 +113,11 @@ Inspector shows that the tools work. Agent evals show whether a model *uses* the
 server's own instructions and tool schemas, and scores each run with deterministic
 checks (no LLM judge): which tools it called, with which arguments, how many calls, and
 regexes over the final answer. Cases live in `src/evals/cases/doctolib.ts`. Each one
-targets one failure mode: tool choice, filter mapping, the silent slug trap, claiming a
-booking it can't make, and calling tools for an unrelated question.
+targets one failure mode: tool choice, filter mapping, the silent slug trap, switching to
+a different visit motive, claiming a booking it can't make, and calling tools for an
+unrelated question. Call budgets are tight (2 for most cases), because one
+`doctolib_search` should answer them. The results recorded below were measured on the
+first, six-tool version, before the consolidation.
 
 ```bash
 # OPENROUTER_API_KEY in .env, host running on :3000

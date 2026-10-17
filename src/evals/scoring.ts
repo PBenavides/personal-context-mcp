@@ -5,9 +5,14 @@
  * went wrong and re-scoring an old trace is free. Runner: `agent-eval.ts`.
  */
 
-/** Exact value, one of several, or a case-insensitive substring/element match. */
+/** Exact value, one of several, a case-insensitive substring/element match, or just "given". */
 export type ArgMatcher =
-  string | number | boolean | { oneOf: (string | number | boolean)[] } | { contains: string };
+  | string
+  | number
+  | boolean
+  | { oneOf: (string | number | boolean)[] }
+  | { contains: string }
+  | { present: true };
 
 export interface EvalCase {
   id: string;
@@ -55,6 +60,9 @@ function matches(matcher: ArgMatcher, value: unknown): boolean {
   }
   if ('oneOf' in matcher) {
     return matcher.oneOf.some((m) => matches(m, value));
+  }
+  if ('present' in matcher) {
+    return value !== undefined && value !== null;
   }
   const needle = matcher.contains.toLowerCase();
   if (Array.isArray(value)) {

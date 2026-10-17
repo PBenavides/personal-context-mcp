@@ -200,12 +200,8 @@ Details: [docs/CICD.md](docs/CICD.md) and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.m
 
 | Tool | Purpose |
 |---|---|
-| `find_earliest_appointment` | Search a specialty in a city and return the soonest open slots across practitioners. |
-| `search_doctors` | Practitioner search without availability. |
-| `get_practitioner` | Visit motives, agendas and places for one profile. |
-| `get_availabilities` | Open slots for one motive/agenda/practice triple. |
-| `list_specialties` | Specialty slugs verified against the live API (other spellings silently return nothing). |
-| `booking_url` | Profile link for a human to book in the browser. |
+| `doctolib_search` | Practitioners for a specialty in a city, by default with their open slots, soonest first; `availability: false` for the plain list. Every result has a `booking_url`. |
+| `doctolib_practitioner` | One profile: visit motives, places, booking link; add `visit_motive_id` for that motive's slots over any window. |
 
 ## Configuration reference
 
