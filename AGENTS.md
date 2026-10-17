@@ -5,12 +5,13 @@ on a DigitalOcean droplet. It is the read/act surface over Pablo's personal data
 an Obsidian vault classified into a 14-category taxonomy (plus an OWL ontology of
 the same), and his personal SaaS accounts.
 
-Two MCPs are mounted today:
+Three MCPs are mounted today:
 
 | Route | What it exposes |
 |---|---|
 | `POST /personal-context` | The enriched corpus — vault notes + activity events. Semantic search (S3 Vectors) with a BM25 fallback, plus ontology tools. |
 | `POST /personal-tools` | The action layer — YNAB, Hevy, Google Calendar. |
+| `POST /doctolib` | Read-only Doctolib appointment search (no credentials). See [`docs/doctolib.md`](docs/doctolib.md). |
 
 This repo is one of four in the `Project2026` workspace. The pipeline that
 *produces* the data lives in `context-pipeline/`, the AWS resources in

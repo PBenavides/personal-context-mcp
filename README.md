@@ -6,6 +6,7 @@ A Fastify host that serves two MCP servers over **streamable HTTP**:
 |---|---|---|
 | `POST /personal-context` | `personal-context` | Read Pablo's enriched personal context — Obsidian vault notes and activity events, classified by [`context-pipeline`](../context-pipeline/) into a 14-category taxonomy. Semantic search (S3 Vectors) with a BM25 fallback, plus an OWL ontology. |
 | `POST /personal-tools` | `personal-tools` | Act on personal accounts — YNAB, Hevy and Google Calendar. |
+| `POST /doctolib` | `doctolib` | Find the earliest doctor appointments on Doctolib (de/fr/it). Read-only, no credentials. See [docs/doctolib.md](docs/doctolib.md). |
 
 ```
 s3://…/context-enriched/ ──(loaded at boot, refreshed on new run_id)──► in-memory corpus
@@ -195,6 +196,17 @@ Details: [docs/CICD.md](docs/CICD.md) and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.m
 | Hevy | `hevy_recent_activity`, `hevy_get_workout`, `hevy_routines`, `hevy_body_measurements`, `hevy_calculate_burnt_calories`, `hevy_search_exercise_catalog`, `hevy_write_routine` | Read-only except `hevy_write_routine` (with `dry_run`). |
 | Google Calendar | `gcal_list_calendars`, `gcal_list_events`, `gcal_get_event`, `gcal_create_event`, `gcal_update_event`, `gcal_delete_event`, `gcal_free_busy` | Defaults to the primary calendar. |
 
+### `doctolib`
+
+| Tool | Purpose |
+|---|---|
+| `find_earliest_appointment` | Search a specialty in a city and return the soonest open slots across practitioners. |
+| `search_doctors` | Practitioner search without availability. |
+| `get_practitioner` | Visit motives, agendas and places for one profile. |
+| `get_availabilities` | Open slots for one motive/agenda/practice triple. |
+| `list_specialties` | Specialty slugs verified against the live API (other spellings silently return nothing). |
+| `booking_url` | Profile link for a human to book in the browser. |
+
 ## Configuration reference
 
 Config comes from `config/default.json`, overridden by env vars mapped in
@@ -232,5 +244,6 @@ production.
 | [docs/connections.md](docs/connections.md) | Adding an external dependency. |
 | [docs/personal-context-mcp.md](docs/personal-context-mcp.md) | Corpus MCP: tools, search, corpus shape. |
 | [docs/personal-tools.md](docs/personal-tools.md) | YNAB / Hevy / Calendar tools and their secrets. |
+| [docs/doctolib.md](docs/doctolib.md) | Doctolib MCP: endpoints, API quirks, what wasn't ported. |
 | [docs/ontologies.md](docs/ontologies.md) | The OWL ontology layer. |
 | [docs/server-and-hosting.md](docs/server-and-hosting.md) | App assembly, config, auth, management routes. |

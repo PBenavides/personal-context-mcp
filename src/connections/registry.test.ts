@@ -61,6 +61,10 @@ const configuredConfig: AppConfig['connections'] = {
     clientSecret: '',
     baseUrl: 'https://www.googleapis.com/calendar/v3',
   },
+  doctolib: {
+    defaultCountry: 'de',
+    minIntervalMs: 0,
+  },
 };
 
 describe('validateConnections', () => {
@@ -89,6 +93,7 @@ describe('createConnections', () => {
     expect(registry.ynab.kind).toBe('ynab');
     expect(registry.hevy.kind).toBe('hevy');
     expect(registry.googleCalendar.kind).toBe('google-calendar');
+    expect(registry.doctolib.kind).toBe('doctolib');
     expect(registry.all()).toEqual([
       registry.enrichedCorpus,
       registry.vectorSearch,
@@ -97,13 +102,14 @@ describe('createConnections', () => {
       registry.ynab,
       registry.hevy,
       registry.googleCalendar,
+      registry.doctolib,
     ]);
   });
 
   it('healthCheckAll() reports corpus not-loaded before load(), the rest inert', async () => {
     const registry = createConnections(configuredConfig);
     const results = await registry.healthCheckAll();
-    expect(results).toHaveLength(7);
+    expect(results).toHaveLength(8);
     expect(results[0].ok).toBe(false);
     expect(results[0].detail).toMatch(/not loaded/);
     expect(results[1].ok).toBe(true);
@@ -117,6 +123,8 @@ describe('createConnections', () => {
     expect(results[5].detail).toMatch(/not configured/);
     expect(results[6].ok).toBe(true);
     expect(results[6].detail).toMatch(/not configured/);
+    expect(results[7].ok).toBe(true);
+    expect(results[7].detail).toMatch(/anonymous/);
   });
 
   it('healthCheckAll() reports ok after load()', async () => {

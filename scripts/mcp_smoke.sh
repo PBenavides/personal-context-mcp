@@ -91,4 +91,12 @@ doc=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\
 echo "$doc" | grep -qF '\"category\"' || fail "get_document returned no category: $doc"
 echo "smoke: get_document OK"
 
+# 6. doctolib MCP is mounted — tools/list only, so the smoke never calls doctolib.de
+DOCTOLIB_URL="${MCP_URL%/*}/doctolib"
+dtools=$(MCP_URL="$DOCTOLIB_URL" rpc '{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}')
+for tool in find_earliest_appointment search_doctors get_availabilities booking_url; do
+  echo "$dtools" | grep -q "\"$tool\"" || fail "doctolib tools/list missing $tool"
+done
+echo "smoke: doctolib tools/list OK"
+
 echo "smoke: ALL GREEN"
