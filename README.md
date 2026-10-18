@@ -5,15 +5,14 @@ A Fastify host that serves two MCP servers over **streamable HTTP**:
 | Route | MCP | What it does |
 |---|---|---|
 | `POST /personal-context` | `personal-context` | Read Pablo's enriched personal context — Obsidian vault notes and activity events, classified by [`context-pipeline`](../context-pipeline/) into a 14-category taxonomy. Semantic search (S3 Vectors) with a BM25 fallback, plus an OWL ontology. |
-| `POST /personal-tools` | `personal-tools` | Act on personal accounts — YNAB, Hevy and Google Calendar. |
-| `POST /doctolib` | `doctolib` | Find the earliest doctor appointments on Doctolib (de/fr/it). Read-only, no credentials. See [docs/doctolib.md](docs/doctolib.md). |
+| `POST /personal-tools` | `personal-tools` | Act on personal accounts — YNAB, Hevy and Google Calendar — and find doctor appointments on Doctolib (read-only). |
 
 ```
 s3://…/context-enriched/ ──(loaded at boot, refreshed on new run_id)──► in-memory corpus
 s3 vectors (Titan embeddings) ──────────────────────────────────────────► semantic search
 
 client ──POST /personal-context (Bearer)──► search_context / get_document / list_taxonomy / ontology_*
-client ──POST /personal-tools   (Bearer)──► ynab_* / hevy_* / gcal_*  ──► YNAB, Hevy, Google Calendar APIs
+client ──POST /personal-tools   (Bearer)──► ynab_* / hevy_* / gcal_* / doctolib_*  ──► YNAB, Hevy, Google Calendar, Doctolib
 ```
 
 Production runs on a DigitalOcean droplet, reachable only over Tailscale.
@@ -72,32 +71,18 @@ aws ssm get-parameter --profile personal --region us-east-1 \
 
 ## Connecting a client
 
-The local client setup assumes the server on **port 3100**, which is what
-`.env.example` sets (`PORT=3100`), so it doesn't collide with other dev servers on 3000.
-The container and production keep 3000 internally.
-
-The repo ships a project-scoped [`.mcp.json`](.mcp.json) with `personal-tools` and
-`doctolib` as separate servers, so Claude Code opened in this folder offers both:
-
-| Server | URL |
-|---|---|
-| `personal-tools` | `http://localhost:3100/personal-tools` |
-| `doctolib` | `http://localhost:3100/doctolib` |
-
-Or add them by hand, along with `personal-context`:
+Claude Code, against your local server:
 
 ```bash
-claude mcp add --transport http personal-tools http://localhost:3100/personal-tools \
+claude mcp add --transport http personal-context http://localhost:3000/personal-context \
   --header "Authorization: Bearer $MCP_BEARER_TOKEN"
-claude mcp add --transport http doctolib http://localhost:3100/doctolib \
-  --header "Authorization: Bearer $MCP_BEARER_TOKEN"
-claude mcp add --transport http personal-context http://localhost:3100/personal-context \
+claude mcp add --transport http personal-tools http://localhost:3000/personal-tools \
   --header "Authorization: Bearer $MCP_BEARER_TOKEN"
 ```
 
-Drop the `--header` if you left `MCP_BEARER_TOKEN` empty. If you set one, add the same
-header to the `.mcp.json` entries. For production, swap the URL for
-`http://100.118.218.44:8090/…` (needs Tailscale) and use the SSM token.
+Drop the `--header` if you left `MCP_BEARER_TOKEN` empty. For production, swap
+the URL for `http://100.118.218.44:8090/…` (needs Tailscale) and use the SSM
+token.
 
 ## Debugging with the MCP Inspector
 
@@ -209,13 +194,7 @@ Details: [docs/CICD.md](docs/CICD.md) and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.m
 | YNAB | `ynab_overview`, `ynab_transactions`, `ynab_categories`, `ynab_report`, `ynab_lookup`, `ynab_assign`, `ynab_write_transaction`, `ynab_write_category` | Built around the one-month-ahead method. Amounts in currency units; every write takes `dry_run`. |
 | Hevy | `hevy_recent_activity`, `hevy_get_workout`, `hevy_routines`, `hevy_body_measurements`, `hevy_calculate_burnt_calories`, `hevy_search_exercise_catalog`, `hevy_write_routine` | Read-only except `hevy_write_routine` (with `dry_run`). |
 | Google Calendar | `gcal_list_calendars`, `gcal_list_events`, `gcal_get_event`, `gcal_create_event`, `gcal_update_event`, `gcal_delete_event`, `gcal_free_busy` | Defaults to the primary calendar. |
-
-### `doctolib`
-
-| Tool | Purpose |
-|---|---|
-| `doctolib_search` | Practitioners for a specialty in a city, by default with their open slots, soonest first; `availability: false` for the plain list. Every result has a `booking_url`. |
-| `doctolib_practitioner` | One profile: visit motives, places, booking link; add `visit_motive_id` for that motive's slots over any window. |
+| Doctolib | `doctolib_search`, `doctolib_practitioner` | Read-only, no credentials. Search returns practitioners with their earliest slots; practitioner gives motives, places, a booking link, and a motive's slots. See [docs/doctolib.md](docs/doctolib.md). |
 
 ## Configuration reference
 
@@ -241,6 +220,7 @@ every variable with comments.
 | `YNAB_TOKEN` | *(empty = `ynab_*` off)* | Secret. |
 | `HEVY_API_KEY` | *(empty = `hevy_*` off)* | Secret. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_CALENDAR_REFRESH_TOKEN` | *(any empty = `gcal_*` off)* | Secrets. |
+| `DOCTOLIB_COUNTRY` / `DOCTOLIB_MIN_INTERVAL_MS` | `de` / `600` | Default Doctolib site and per-host request throttle. Not secrets. |
 
 All secrets come from `.env` locally and from SSM `/personal-context/*` in
 production.
@@ -254,6 +234,6 @@ production.
 | [docs/connections.md](docs/connections.md) | Adding an external dependency. |
 | [docs/personal-context-mcp.md](docs/personal-context-mcp.md) | Corpus MCP: tools, search, corpus shape. |
 | [docs/personal-tools.md](docs/personal-tools.md) | YNAB / Hevy / Calendar tools and their secrets. |
-| [docs/doctolib.md](docs/doctolib.md) | Doctolib MCP: endpoints, API quirks, what wasn't ported. |
+| [docs/doctolib.md](docs/doctolib.md) | The Doctolib tools: endpoints, API quirks, what wasn't ported. |
 | [docs/ontologies.md](docs/ontologies.md) | The OWL ontology layer. |
 | [docs/server-and-hosting.md](docs/server-and-hosting.md) | App assembly, config, auth, management routes. |

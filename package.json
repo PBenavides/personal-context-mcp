@@ -11,8 +11,6 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "eval": "tsx src/evals/agent-eval.ts",
-    "google:auth": "tsx src/scripts/google-auth.ts",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest",
     "typecheck": "tsc --noEmit",
     "lint": "eslint 'src/**/*.ts'",

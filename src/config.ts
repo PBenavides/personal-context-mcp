@@ -89,7 +89,7 @@ export interface ConnectionsConfig {
     baseUrl: string;
   };
   /**
-   * Doctolib's internal patient-frontend JSON API behind the doctolib MCP (see
+   * Doctolib's internal patient-frontend JSON API behind the personal-tools doctolib_* tools (see
    * `src/connections/doctolib.ts`). Anonymous reads only — no credentials, always on.
    * `defaultCountry` picks doctolib.de/.fr/.it when a tool omits `country`; `minIntervalMs`
    * is the per-host throttle between requests.

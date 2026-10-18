@@ -5,13 +5,12 @@ on a DigitalOcean droplet. It is the read/act surface over Pablo's personal data
 an Obsidian vault classified into a 14-category taxonomy (plus an OWL ontology of
 the same), and his personal SaaS accounts.
 
-Three MCPs are mounted today:
+Two MCPs are mounted today:
 
 | Route | What it exposes |
 |---|---|
 | `POST /personal-context` | The enriched corpus — vault notes + activity events. Semantic search (S3 Vectors) with a BM25 fallback, plus ontology tools. |
-| `POST /personal-tools` | The action layer — YNAB, Hevy, Google Calendar. |
-| `POST /doctolib` | Read-only Doctolib appointment search (no credentials). See [`docs/doctolib.md`](docs/doctolib.md). |
+| `POST /personal-tools` | The action layer — YNAB, Hevy, Google Calendar, plus read-only Doctolib appointment search. |
 
 This repo is one of four in the `Project2026` workspace. The pipeline that
 *produces* the data lives in `context-pipeline/`, the AWS resources in
@@ -29,6 +28,7 @@ Pick the doc for the layer you're touching — each is the authority for its are
 | [`docs/connections.md`](docs/connections.md) | How MCPs reach external dependencies; the `Connection` contract and registry. Read before adding a dependency. |
 | [`docs/personal-context-mcp.md`](docs/personal-context-mcp.md) | The corpus MCP: tools, search behaviour, corpus shape. |
 | [`docs/personal-tools.md`](docs/personal-tools.md) | The action MCP: YNAB / Hevy / Google Calendar tool surface and write semantics. |
+| [`docs/doctolib.md`](docs/doctolib.md) | The `doctolib_*` tools in personal-tools: Doctolib's internal JSON API and its quirks. |
 | [`docs/ontologies.md`](docs/ontologies.md) | The OWL layer — classes, individuals, RDF/XML persistence, versioning. |
 | [`docs/cron-and-parsing.md`](docs/cron-and-parsing.md) | When the ontology injector runs and how documents become typed assertions. |
 | [`docs/server-and-hosting.md`](docs/server-and-hosting.md) | Everything outside the MCPs: app assembly, config, auth, management routes. |
@@ -45,7 +45,7 @@ src/
   auth.ts          static bearer guard on MCP routes (empty token = off, local dev)
   connections/     one module per external dependency (enriched corpus, vector
                    search, BM25, ontology store, YNAB, Hevy, Calendar,
-                   OpenRouter) + the registry that builds and probes them
+                   Doctolib, OpenRouter) + the registry that builds and probes them
   mcps/            one folder per MCP: index.ts registers tools, tools.ts holds
                    the handlers as pure functions over an injected client
   registry/        turns an mcps/ folder into a mounted JSON-RPC route

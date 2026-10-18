@@ -7,7 +7,7 @@ import {
   normaliseProvider,
   searchDoctors,
   slotsByDay,
-} from './tools.js';
+} from './doctolib-tools.js';
 
 // Payload shapes follow esinecan/doctolib-mcp's recorded fixtures.
 const SEARCH = {

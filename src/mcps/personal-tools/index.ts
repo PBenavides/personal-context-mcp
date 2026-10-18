@@ -1,8 +1,10 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { DOCTOLIB_COUNTRIES, type DoctolibCountry } from '../../connections/doctolib.js';
 import { getConnections } from '../../connections/registry.js';
 import type { McpDefinition } from '../../registry/types.js';
 import { getAppVersion } from '../../version.js';
+import { SPECIALTY_GUIDE, doctolibPractitioner, doctolibSearch } from './doctolib-tools.js';
 import { MUSCLE_GROUPS } from './hevy-payloads.js';
 import {
   CLEARED_STATES,
@@ -41,13 +43,14 @@ const NAME = 'personal-tools';
 const VERSION = getAppVersion();
 
 const INSTRUCTIONS =
-  "Action layer over Pablo's personal accounts. Three integrations: YNAB budgeting " +
+  "Action layer over Pablo's personal accounts. Four integrations: YNAB budgeting " +
   '(ynab_* — a budget-health overview, transaction queries, categories with targets, ' +
   'reports, lookups, and writes that assign money, manage transactions, and reshape ' +
   'categories), Hevy workout tracking ' +
   '(hevy_* — recent training by muscle group and day, logged workouts, routines, body ' +
-  'measurements, a calorie estimate, and exercise-catalog search), and Google Calendar (gcal_* — list ' +
-  'calendars/events, get/create/update/delete an event, free/busy lookup). The budget runs ' +
+  'measurements, a calorie estimate, and exercise-catalog search), Google Calendar (gcal_* — list ' +
+  'calendars/events, get/create/update/delete an event, free/busy lookup), and Doctolib ' +
+  '(doctolib_* — find doctors and their earliest appointment slots; read-only). The budget runs ' +
   "the one-month-ahead method: income received this month is assigned into next month's " +
   'categories (ynab_assign with month: "next") until Ready to Assign is 0. Start any ' +
   'budget-health question at ynab_overview. All ynab_* amounts are currency units, never ' +
@@ -65,7 +68,15 @@ const INSTRUCTIONS =
   'resolve), and dry_run previews the request body. Hevy cannot log or edit a workout, create a ' +
   'custom exercise, or delete anything — those happen in the app. ' +
   'hevy_calculate_burnt_calories returns a rough estimate (±20-30%): always report its ' +
-  'accuracy_note and warnings with the number rather than presenting it as measured.';
+  'accuracy_note and warnings with the number rather than presenting it as measured. ' +
+  'Doctolib reads the JSON API its patient website uses and never books or cancels: ' +
+  'doctolib_search finds practitioners for a specialty in a city and, by default, checks their ' +
+  'open slots soonest first (availability: false just browses); doctolib_practitioner shows ' +
+  'one profile, and visit_motive_id adds that motive\'s slots (e.g. a first visit instead of ' +
+  'the acute-care motive search matched). The specialty must be one of Doctolib\'s German ' +
+  'slugs — other spellings return zero results, not an error. To book, give the user ' +
+  'booking_url. A reason of "not_opened_availability" means the practice has not released ' +
+  'slots that far ahead yet, which is not the same as fully booked.';
 
 interface TextResult {
   [key: string]: unknown;
@@ -92,6 +103,22 @@ const budgetId = z
   .string()
   .optional()
   .describe('Budget; defaults to the last-used budget');
+
+/**
+ * Doctolib's language filter takes flag-style codes: English is "gb", and "en" silently
+ * matches nobody (0 vs 464 public GPs in Berlin, 2026-10-17). Models reach for "en" (seen when
+ * testing with an LLM agent), so it is aliased rather than left to fail.
+ */
+const DOCTOLIB_LANGUAGE_ALIASES: Record<string, string> = { en: 'gb' };
+
+function parseDoctolibLanguages(value: string | undefined): string[] | undefined {
+  const langs = value
+    ?.split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+    .map((s) => DOCTOLIB_LANGUAGE_ALIASES[s] ?? s);
+  return langs?.length ? [...new Set(langs)] : undefined;
+}
 
 /**
  * Builds a fresh personal-tools MCP server. Handlers live in `./tools.js` (unit-tested with
@@ -1045,6 +1072,134 @@ export function buildServer(): McpServer {
         );
       } catch (error) {
         return errorResult('Google Calendar free/busy failed', error);
+      }
+    },
+  );
+
+  // Doctolib: anonymous reads, so no "not configured" path — the connection is always ready.
+  const doctolib = getConnections().doctolib;
+  const doctolibCountry = z
+    .enum(DOCTOLIB_COUNTRIES as [DoctolibCountry, ...DoctolibCountry[]])
+    .optional()
+    .describe(`Doctolib site: de, fr or it (default ${doctolib.defaultCountry})`);
+  const doctolibDays = z
+    .number()
+    .int()
+    .min(2)
+    .max(90)
+    .optional()
+    .describe('Horizon in days (default 14)');
+
+  server.registerTool(
+    'doctolib_search',
+    {
+      title: 'Search Doctolib for practitioners and their earliest slots',
+      description:
+        'Find practitioners for a specialty in a city. By default checks every bookable match ' +
+        'for open slots and returns them soonest first, each with next_slot, a few days of ' +
+        'times, booking_url, and the profile_slug and motive_id doctolib_practitioner takes. ' +
+        'availability: false returns the plain list (faster; use page to go further).',
+      inputSchema: {
+        specialty: z
+          .string()
+          .min(1)
+          .describe(
+            'Doctolib specialty slug. Use exactly one of these — other spellings return no ' +
+              `results: ${SPECIALTY_GUIDE}`,
+          ),
+        city: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('City or address to search around (default Berlin)'),
+        availability: z
+          .boolean()
+          .optional()
+          .describe('Check open slots and sort by earliest (default true)'),
+        within_days: doctolibDays,
+        insurance_sector: z
+          .enum(['public', 'private'])
+          .optional()
+          .describe('"public" (gesetzlich) or "private"'),
+        languages: z
+          .string()
+          .optional()
+          .describe(
+            'Comma-separated language codes the doctor speaks. Flag-style: English is "gb" ' +
+              '(not "en"), e.g. "gb" or "tr,gb"',
+          ),
+        telehealth: z
+          .boolean()
+          .optional()
+          .describe('true = video consultations only, false = in-person only; omit for both'),
+        limit: z.number().int().min(1).max(20).optional().describe('Results to return (default 10)'),
+        page: z.number().int().min(0).optional().describe('Search result page, 0-based (default 0)'),
+        country: doctolibCountry,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async args => {
+      try {
+        return jsonResult(
+          await doctolibSearch(doctolib.get(), {
+            specialty: args.specialty,
+            city: args.city ?? 'Berlin',
+            country: args.country ?? doctolib.defaultCountry,
+            availability: args.availability,
+            withinDays: args.within_days,
+            insuranceSector: args.insurance_sector,
+            languages: parseDoctolibLanguages(args.languages),
+            telehealth: args.telehealth,
+            limit: args.limit,
+            page: args.page,
+          }),
+        );
+      } catch (error) {
+        return errorResult('Doctolib search failed', error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'doctolib_practitioner',
+    {
+      title: 'Doctolib practitioner profile and slots',
+      description:
+        'One practitioner by profile_slug: visit motives (with ids), places, and booking_url — ' +
+        "the link a human opens to book. Pass visit_motive_id to also get that motive's open " +
+        'slots, by place and day; start_date and days move the window.',
+      inputSchema: {
+        profile_slug: z.string().min(1).describe('profile_slug from doctolib_search'),
+        visit_motive_id: z
+          .number()
+          .int()
+          .optional()
+          .describe(
+            'A motive id from this profile (or motive_id from doctolib_search) to get slots for',
+          ),
+        start_date: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .optional()
+          .describe('YYYY-MM-DD; first day of the slot window (default today)'),
+        days: doctolibDays,
+        country: doctolibCountry,
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async args => {
+      try {
+        return jsonResult(
+          await doctolibPractitioner(doctolib.get(), {
+            profileSlug: args.profile_slug,
+            country: args.country ?? doctolib.defaultCountry,
+            visitMotiveId: args.visit_motive_id,
+            startDate: args.start_date,
+            days: args.days,
+          }),
+        );
+      } catch (error) {
+        return errorResult('Doctolib practitioner lookup failed', error);
       }
     },
   );

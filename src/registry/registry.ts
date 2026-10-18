@@ -1,4 +1,3 @@
-import { doctolibDefinition } from '../mcps/doctolib/index.js';
 import { personalContextDefinition } from '../mcps/personal-context/index.js';
 import { personalToolsDefinition } from '../mcps/personal-tools/index.js';
 import type { McpDefinition } from './types.js';
@@ -20,7 +19,6 @@ export function validateDefinitions(defs: readonly McpDefinition[]): void {
 const definitions: readonly McpDefinition[] = [
   personalContextDefinition,
   personalToolsDefinition,
-  doctolibDefinition,
 ];
 
 validateDefinitions(definitions);

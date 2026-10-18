@@ -4,8 +4,9 @@ import type { Connection, ConnectionHealth } from './types.js';
 /**
  * The Doctolib connection: transport for the internal JSON API Doctolib's patient frontend
  * uses (there is no public API — the official one is partner-only), plus Nominatim geocoding,
- * which the search endpoint needs to build its bounding box. Consumed by the doctolib MCP;
- * endpoint paths and response shaping live in `src/mcps/doctolib/tools.ts`.
+ * which the search endpoint needs to build its bounding box. Consumed by the doctolib_* tools
+ * in personal-tools; endpoint paths and response shaping live in
+ * `src/mcps/personal-tools/doctolib-tools.ts`.
  *
  * Ported from esinecan/doctolib-mcp (Python), read path only. Its `docs/endpoints.md` is the
  * reference for the contract; the parts this transport depends on:
