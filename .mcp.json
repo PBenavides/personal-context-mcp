@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "personal-tools": {
+      "type": "http",
+      "url": "http://localhost:3100/personal-tools"
+    },
+    "doctolib": {
+      "type": "http",
+      "url": "http://localhost:3100/doctolib"
+    }
+  }
+}

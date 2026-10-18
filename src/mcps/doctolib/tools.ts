@@ -498,7 +498,9 @@ export async function doctolibPractitioner(
   const out: Json = compact({
     name: prof.name,
     speciality: prof.speciality,
-    booking_url: prof.profile_url ?? `${client.baseUrl(args.country)}/booking/${args.profileSlug}`,
+    // Practices ("organizations") come with an empty redirect_url. /profiles/<slug> redirects
+    // to the real page for both kinds; /booking/<slug> silently lands on the homepage.
+    booking_url: prof.profile_url ?? `${client.baseUrl(args.country)}/profiles/${args.profileSlug}`,
     telehealth: prof.telehealth_enabled || null,
     places: places.map((pl) => compact({ name: pl.name, address: pl.address, city: pl.city })),
     motives: motives.map((m) =>

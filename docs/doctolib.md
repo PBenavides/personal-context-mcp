@@ -98,7 +98,7 @@ integrations.
 ## Checking it by hand
 
 ```bash
-npx @modelcontextprotocol/inspector --cli http://localhost:3000/doctolib --transport http \
+npx @modelcontextprotocol/inspector --cli http://localhost:3100/doctolib --transport http \
   --method tools/call --tool-name doctolib_search \
   --tool-arg specialty=zahnmedizin --tool-arg city=Berlin --tool-arg limit=3
 ```
@@ -116,8 +116,32 @@ regexes over the final answer. Cases live in `src/evals/cases/doctolib.ts`. Each
 targets one failure mode: tool choice, filter mapping, the silent slug trap, switching to
 a different visit motive, claiming a booking it can't make, and calling tools for an
 unrelated question. Call budgets are tight (2 for most cases), because one
-`doctolib_search` should answer them. The results recorded below were measured on the
-first, six-tool version, before the consolidation.
+`doctolib_search` should answer them.
+
+### Results on the two-tool version (2026-10-18)
+
+`nvidia/nemotron-3-super-120b-a12b:free`, native tool calling, two runs per case:
+
+| Case | Passed | Calls per run |
+|---|---|---|
+| earliest-dentist | 2/2 | 1 |
+| english-gp-public | 2/2 | 1 |
+| dermatologist-hamburg | 2/2 | 1 |
+| new-patient-motive | 2/2 | 2 (profile, then the first-examination motive's slots) |
+| book-request | 2/2 | 1 |
+| out-of-scope | 2/2 | 0 |
+
+The main run averaged 0.9 tool calls and 6.1k tokens per case. On the six-tool version
+the same model typically used 2–3 calls (a `list_specialties` lookup, then a
+`booking_url` follow-up) and 15–50k tokens. `new-patient-motive` was rewritten during
+this run. Its first, generic wording ("find a dentist, then a new-patient slot") was
+answered correctly by one search whenever the top hit already matched a new-patient
+motive, which failed a case that demanded the practitioner call. It now names a practice
+whose search motive is the pain slot. The run also caught a broken link: for practices,
+`info.json` has an empty `redirect_url`, and the old `/booking/<slug>` fallback redirects
+to the homepage. The fallback is now `/profiles/<slug>`, which redirects to the real page.
+
+The results below were measured on the first, six-tool version, before the consolidation.
 
 ```bash
 # OPENROUTER_API_KEY in .env, host running on :3000

@@ -72,18 +72,32 @@ aws ssm get-parameter --profile personal --region us-east-1 \
 
 ## Connecting a client
 
-Claude Code, against your local server:
+The local client setup assumes the server on **port 3100**, which is what
+`.env.example` sets (`PORT=3100`), so it doesn't collide with other dev servers on 3000.
+The container and production keep 3000 internally.
+
+The repo ships a project-scoped [`.mcp.json`](.mcp.json) with `personal-tools` and
+`doctolib` as separate servers, so Claude Code opened in this folder offers both:
+
+| Server | URL |
+|---|---|
+| `personal-tools` | `http://localhost:3100/personal-tools` |
+| `doctolib` | `http://localhost:3100/doctolib` |
+
+Or add them by hand, along with `personal-context`:
 
 ```bash
-claude mcp add --transport http personal-context http://localhost:3000/personal-context \
+claude mcp add --transport http personal-tools http://localhost:3100/personal-tools \
   --header "Authorization: Bearer $MCP_BEARER_TOKEN"
-claude mcp add --transport http personal-tools http://localhost:3000/personal-tools \
+claude mcp add --transport http doctolib http://localhost:3100/doctolib \
+  --header "Authorization: Bearer $MCP_BEARER_TOKEN"
+claude mcp add --transport http personal-context http://localhost:3100/personal-context \
   --header "Authorization: Bearer $MCP_BEARER_TOKEN"
 ```
 
-Drop the `--header` if you left `MCP_BEARER_TOKEN` empty. For production, swap
-the URL for `http://100.118.218.44:8090/…` (needs Tailscale) and use the SSM
-token.
+Drop the `--header` if you left `MCP_BEARER_TOKEN` empty. If you set one, add the same
+header to the `.mcp.json` entries. For production, swap the URL for
+`http://100.118.218.44:8090/…` (needs Tailscale) and use the SSM token.
 
 ## Debugging with the MCP Inspector
 

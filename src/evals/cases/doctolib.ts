@@ -50,15 +50,15 @@ export const doctolibCases: EvalCase[] = [
   },
   {
     id: 'new-patient-motive',
-    probes: 'switches from the motive search matched to a new-patient one via doctolib_practitioner',
+    probes: 'switches from the pain-slot motive to a first examination via doctolib_practitioner',
+    // A named practice whose search motive is "Schmerztermin" (pain slot), so answering needs
+    // the motive switch. A generic "find a dentist" prompt let search alone answer it whenever
+    // the top hit already matched a new-patient motive (seen live on 2026-10-18).
     prompt:
-      'Find a dentist in Berlin, then tell me when they have a first examination for new patients ' +
-      '(not an emergency/pain slot).',
-    expectCalls: [
-      { tool: 'doctolib_search' },
-      { tool: 'doctolib_practitioner', args: { visit_motive_id: { present: true } } },
-    ],
-    maxToolCalls: 5,
+      'For Dr. Thomas Wittig, dentist in Berlin (Doctolib profile thomas-wittig-berlin): when is ' +
+      'the next first examination for a new patient? Not the pain/emergency appointment.',
+    expectCalls: [{ tool: 'doctolib_practitioner', args: { visit_motive_id: { present: true } } }],
+    maxToolCalls: 3,
     answerMatches: [
       '20\\d\\d-\\d\\d-\\d\\d|\\d{1,2}\\.\\s?\\d{1,2}\\.|no (open|available)|not (yet )?(open|released)',
     ],

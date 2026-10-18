@@ -363,7 +363,7 @@ Follows the host's existing patterns exactly (see the connection/registry docs):
 ## Point a client at it
 
 ```bash
-claude mcp add --transport http personal-tools http://localhost:3000/personal-tools \
+claude mcp add --transport http personal-tools http://localhost:3100/personal-tools \
   --header "Authorization: Bearer $MCP_BEARER_TOKEN"
 ```
 

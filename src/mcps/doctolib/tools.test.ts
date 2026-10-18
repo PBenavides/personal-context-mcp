@@ -346,6 +346,15 @@ describe('doctolibPractitioner', () => {
     ).rejects.toThrow(/offered: 55012 \(Akutsprechstunde\), 55013/);
   });
 
+  it('falls back to /profiles/<slug> for a practice with no redirect_url', async () => {
+    const practice = { data: { ...INFO.data, profile: { ...INFO.data.profile, redirect_url: '' } } };
+    const out = await doctolibPractitioner(
+      fakeClient(() => practice),
+      { profileSlug: 'zahnzentrum-hohenschoenhausen-berlin', country: 'de' },
+    );
+    expect(out.booking_url).toBe('https://www.doctolib.de/profiles/zahnzentrum-hohenschoenhausen-berlin');
+  });
+
   it('appends the slug when redirect_url is only the specialty/city listing', async () => {
     const listing = {
       data: { ...INFO.data, profile: { ...INFO.data.profile, redirect_url: '/zahnmedizin/berlin' } },
