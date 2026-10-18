@@ -91,4 +91,13 @@ doc=$(rpc "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\
 echo "$doc" | grep -qF '\"category\"' || fail "get_document returned no category: $doc"
 echo "smoke: get_document OK"
 
+# 6. doctolib_* are registered on personal-tools — tools/list only, so the smoke never
+#    calls doctolib.de
+TOOLS_URL="${MCP_URL%/*}/personal-tools"
+ptools=$(MCP_URL="$TOOLS_URL" rpc '{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{}}')
+for tool in doctolib_search doctolib_practitioner; do
+  echo "$ptools" | grep -q "\"$tool\"" || fail "personal-tools tools/list missing $tool"
+done
+echo "smoke: personal-tools doctolib_* OK"
+
 echo "smoke: ALL GREEN"

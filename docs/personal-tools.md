@@ -301,6 +301,18 @@ Mapping from the Python surface: `gcal_list_calendars` /  `gcal_list_events` /
 `gcal_free_busy` (renamed for symmetry with the REST endpoint name). The
 `_format_event` normalization and pagination behavior are preserved exactly.
 
+### Doctolib (`doctolib_*`)
+
+Read-only appointment search over the JSON API Doctolib's patient website uses. It needs
+no credentials, is always on, and never books or cancels. The handlers are in
+`doctolib-tools.ts`, the transport in `src/connections/doctolib.ts`, and the API
+contract and its quirks in [`doctolib.md`](doctolib.md).
+
+| Tool | Parameters | Purpose |
+|---|---|---|
+| `doctolib_search` | `specialty`, `city?` (Berlin), `availability?` (true), `within_days?` (14), `insurance_sector?`, `languages?`, `telehealth?`, `limit?` (10), `page?`, `country?` | Practitioners for a specialty in a city. By default it probes each bookable hit's slots and returns them soonest first; `availability: false` is the plain paged list. Each result carries `booking_url`, `profile_slug` and `motive_id`. |
+| `doctolib_practitioner` | `profile_slug`, `visit_motive_id?`, `start_date?`, `days?`, `country?` | One profile: visit motives, places, `booking_url`. With `visit_motive_id`, that motive's slots per place and day. |
+
 ## Secrets
 
 Same pattern as `OPENROUTER_API_KEY` — plain env vars through `node-config`
@@ -382,7 +394,14 @@ claude mcp add --transport http personal-tools http://localhost:3000/personal-to
   an ambiguous exercise name was refused with candidates. **No live write has
   been executed** — the create/update paths are verified only through `dry_run`
   and unit tests, because Hevy has no DELETE to undo a test record with.
-- Calendar tools (`gcal_*`) are implemented and unit-tested but **not yet
-  smoke-tested against a real Google account** — `GOOGLE_CALENDAR_REFRESH_TOKEN`
-  needs to be minted (see Secrets above) before `tools/list`/live calls can be
-  verified end-to-end.
+- Calendar tools (`gcal_*`), live against a real Google account (2026-10-17):
+  `gcal_list_calendars`, `gcal_list_events` and `gcal_free_busy` returned real
+  data; a throwaway event went through `gcal_create_event` → `gcal_update_event`
+  → `gcal_get_event` → `gcal_delete_event`, and read back as `status: cancelled`
+  afterwards (Google keeps deleted events as cancelled tombstones; that is
+  expected). A start of 10:00 `Europe/Berlin` came back as 12:00+04:00, so
+  `timezone` is applied and results arrive in the calendar's own zone.
+- Doctolib tools (`doctolib_*`), live against doctolib.de (2026-10-18): search with
+  and without availability, the `en`→`gb` language alias, the zero-hit slug hint,
+  a profile, and a motive's slots over a custom window. Booking links were checked
+  to return 200.

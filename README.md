@@ -5,14 +5,14 @@ A Fastify host that serves two MCP servers over **streamable HTTP**:
 | Route | MCP | What it does |
 |---|---|---|
 | `POST /personal-context` | `personal-context` | Read Pablo's enriched personal context — Obsidian vault notes and activity events, classified by [`context-pipeline`](../context-pipeline/) into a 14-category taxonomy. Semantic search (S3 Vectors) with a BM25 fallback, plus an OWL ontology. |
-| `POST /personal-tools` | `personal-tools` | Act on personal accounts — YNAB, Hevy and Google Calendar. |
+| `POST /personal-tools` | `personal-tools` | Act on personal accounts — YNAB, Hevy and Google Calendar — and find doctor appointments on Doctolib (read-only). |
 
 ```
 s3://…/context-enriched/ ──(loaded at boot, refreshed on new run_id)──► in-memory corpus
 s3 vectors (Titan embeddings) ──────────────────────────────────────────► semantic search
 
 client ──POST /personal-context (Bearer)──► search_context / get_document / list_taxonomy / ontology_*
-client ──POST /personal-tools   (Bearer)──► ynab_* / hevy_* / gcal_*  ──► YNAB, Hevy, Google Calendar APIs
+client ──POST /personal-tools   (Bearer)──► ynab_* / hevy_* / gcal_* / doctolib_*  ──► YNAB, Hevy, Google Calendar, Doctolib
 ```
 
 Production runs on a DigitalOcean droplet, reachable only over Tailscale.
@@ -194,6 +194,7 @@ Details: [docs/CICD.md](docs/CICD.md) and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.m
 | YNAB | `ynab_overview`, `ynab_transactions`, `ynab_categories`, `ynab_report`, `ynab_lookup`, `ynab_assign`, `ynab_write_transaction`, `ynab_write_category` | Built around the one-month-ahead method. Amounts in currency units; every write takes `dry_run`. |
 | Hevy | `hevy_recent_activity`, `hevy_get_workout`, `hevy_routines`, `hevy_body_measurements`, `hevy_calculate_burnt_calories`, `hevy_search_exercise_catalog`, `hevy_write_routine` | Read-only except `hevy_write_routine` (with `dry_run`). |
 | Google Calendar | `gcal_list_calendars`, `gcal_list_events`, `gcal_get_event`, `gcal_create_event`, `gcal_update_event`, `gcal_delete_event`, `gcal_free_busy` | Defaults to the primary calendar. |
+| Doctolib | `doctolib_search`, `doctolib_practitioner` | Read-only, no credentials. Search returns practitioners with their earliest slots; practitioner gives motives, places, a booking link, and a motive's slots. See [docs/doctolib.md](docs/doctolib.md). |
 
 ## Configuration reference
 
@@ -219,6 +220,7 @@ every variable with comments.
 | `YNAB_TOKEN` | *(empty = `ynab_*` off)* | Secret. |
 | `HEVY_API_KEY` | *(empty = `hevy_*` off)* | Secret. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_CALENDAR_REFRESH_TOKEN` | *(any empty = `gcal_*` off)* | Secrets. |
+| `DOCTOLIB_COUNTRY` / `DOCTOLIB_MIN_INTERVAL_MS` | `de` / `600` | Default Doctolib site and per-host request throttle. Not secrets. |
 
 All secrets come from `.env` locally and from SSM `/personal-context/*` in
 production.
@@ -232,5 +234,6 @@ production.
 | [docs/connections.md](docs/connections.md) | Adding an external dependency. |
 | [docs/personal-context-mcp.md](docs/personal-context-mcp.md) | Corpus MCP: tools, search, corpus shape. |
 | [docs/personal-tools.md](docs/personal-tools.md) | YNAB / Hevy / Calendar tools and their secrets. |
+| [docs/doctolib.md](docs/doctolib.md) | The Doctolib tools: endpoints, API quirks, what wasn't ported. |
 | [docs/ontologies.md](docs/ontologies.md) | The OWL ontology layer. |
 | [docs/server-and-hosting.md](docs/server-and-hosting.md) | App assembly, config, auth, management routes. |

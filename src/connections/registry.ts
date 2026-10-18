@@ -1,4 +1,5 @@
 import { appConfig, type AppConfig } from '../config.js';
+import { createDoctolibConnection } from './doctolib.js';
 import { createEnrichedCorpusConnection } from './enriched-corpus.js';
 import { createGoogleCalendarConnection } from './google-calendar.js';
 import { createHevyConnection } from './hevy.js';
@@ -45,6 +46,7 @@ export function createConnections(
   const ynab = createYnabConnection(config.ynab);
   const hevy = createHevyConnection(config.hevy);
   const googleCalendar = createGoogleCalendarConnection(config.googleCalendar);
+  const doctolib = createDoctolibConnection(config.doctolib);
 
   const all: ReadonlyArray<Connection<unknown>> = [
     enrichedCorpus,
@@ -54,6 +56,7 @@ export function createConnections(
     ynab,
     hevy,
     googleCalendar,
+    doctolib,
   ];
   validateConnections(all);
 
@@ -65,6 +68,7 @@ export function createConnections(
     ynab,
     hevy,
     googleCalendar,
+    doctolib,
     all(): ReadonlyArray<Connection<unknown>> {
       return all;
     },

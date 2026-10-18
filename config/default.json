@@ -49,6 +49,10 @@
       "clientId": "",
       "clientSecret": "",
       "baseUrl": "https://www.googleapis.com/calendar/v3"
+    },
+    "doctolib": {
+      "defaultCountry": "de",
+      "minIntervalMs": 600
     }
   },
   "security": {

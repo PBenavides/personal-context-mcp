@@ -1,3 +1,4 @@
+import type { DoctolibConnection } from './doctolib.js';
 import type { EnrichedCorpusConnection } from './enriched-corpus.js';
 import type { GoogleCalendarConnection } from './google-calendar.js';
 import type { HevyConnection } from './hevy.js';
@@ -24,7 +25,8 @@ export type ConnectionKind =
   | 'openrouter'
   | 'ynab'
   | 'hevy'
-  | 'google-calendar';
+  | 'google-calendar'
+  | 'doctolib';
 
 /** Result of a lightweight liveness probe against a single connection. */
 export interface ConnectionHealth {
@@ -67,6 +69,7 @@ export interface ConnectionRegistry {
   readonly ynab: YnabConnection;
   readonly hevy: HevyConnection;
   readonly googleCalendar: GoogleCalendarConnection;
+  readonly doctolib: DoctolibConnection;
   /** All registered connections, for generic operations like health checks. */
   all(): ReadonlyArray<Connection<unknown>>;
   /** Probe every connection concurrently. */

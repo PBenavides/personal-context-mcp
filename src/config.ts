@@ -88,6 +88,16 @@ export interface ConnectionsConfig {
     clientSecret: string;
     baseUrl: string;
   };
+  /**
+   * Doctolib's internal patient-frontend JSON API behind the personal-tools doctolib_* tools (see
+   * `src/connections/doctolib.ts`). Anonymous reads only — no credentials, always on.
+   * `defaultCountry` picks doctolib.de/.fr/.it when a tool omits `country`; `minIntervalMs`
+   * is the per-host throttle between requests.
+   */
+  doctolib: {
+    defaultCountry: string;
+    minIntervalMs: number;
+  };
 }
 
 export interface AppConfig {
@@ -141,6 +151,10 @@ export const appConfig: AppConfig = {
     ynab: config.get<ConnectionsConfig['ynab']>('connections.ynab'),
     hevy: config.get<ConnectionsConfig['hevy']>('connections.hevy'),
     googleCalendar: config.get<ConnectionsConfig['googleCalendar']>('connections.googleCalendar'),
+    doctolib: {
+      ...config.get<ConnectionsConfig['doctolib']>('connections.doctolib'),
+      minIntervalMs: Number(config.get<number | string>('connections.doctolib.minIntervalMs')),
+    },
   },
   security: config.get<AppConfig['security']>('security'),
 };
