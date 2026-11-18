@@ -7,6 +7,16 @@ import { getAppVersion } from '../../version.js';
 import { SPECIALTY_GUIDE, doctolibPractitioner, doctolibSearch } from './doctolib-tools.js';
 import { MUSCLE_GROUPS } from './hevy-payloads.js';
 import {
+  BROWSING_GROUPS,
+  FOCUS_GROUPS,
+  FOCUS_STATUSES,
+  MAX_QUERY_ROWS,
+  webtimeBrowsing,
+  webtimeFocus,
+  webtimeOverview,
+  webtimeQuery,
+} from './webtime-tools.js';
+import {
   CLEARED_STATES,
   FLAG_COLORS,
   FREQUENCIES,
@@ -43,14 +53,16 @@ const NAME = 'personal-tools';
 const VERSION = getAppVersion();
 
 const INSTRUCTIONS =
-  "Action layer over Pablo's personal accounts. Four integrations: YNAB budgeting " +
+  "Action layer over Pablo's personal accounts. Five integrations: YNAB budgeting " +
   '(ynab_* — a budget-health overview, transaction queries, categories with targets, ' +
   'reports, lookups, and writes that assign money, manage transactions, and reshape ' +
   'categories), Hevy workout tracking ' +
   '(hevy_* — recent training by muscle group and day, logged workouts, routines, body ' +
   'measurements, a calorie estimate, and exercise-catalog search), Google Calendar (gcal_* — list ' +
-  'calendars/events, get/create/update/delete an event, free/busy lookup), and Doctolib ' +
-  '(doctolib_* — find doctors and their earliest appointment slots; read-only). The budget runs ' +
+  'calendars/events, get/create/update/delete an event, free/busy lookup), Doctolib ' +
+  '(doctolib_* — find doctors and their earliest appointment slots; read-only), and the Web ' +
+  'Time Tracker (webtime_* — time spent per website and lock-in focus sessions from Pablo\'s ' +
+  'Chrome extension; read-only). The budget runs ' +
   "the one-month-ahead method: income received this month is assigned into next month's " +
   'categories (ynab_assign with month: "next") until Ready to Assign is 0. Start any ' +
   'budget-health question at ynab_overview. All ynab_* amounts are currency units, never ' +
@@ -76,7 +88,16 @@ const INSTRUCTIONS =
   'the acute-care motive search matched). The specialty must be one of Doctolib\'s German ' +
   'slugs — other spellings return zero results, not an error. To book, give the user ' +
   'booking_url. A reason of "not_opened_availability" means the practice has not released ' +
-  'slots that far ahead yet, which is not the same as fully booked.';
+  'slots that far ahead yet, which is not the same as fully booked. ' +
+  'The Web Time Tracker reads the Neon Postgres mirror the extension syncs every 15 minutes, ' +
+  'so the current browsing session and anything newer than the last sync are missing ' +
+  '(webtime_overview reports each device\'s last_sync). Start at webtime_overview; ' +
+  'webtime_browsing breaks browsing time down by site, day, hour, page title, or raw session, ' +
+  'and webtime_focus does the same for lock-ins with distraction counts and the extension\'s ' +
+  '1-5 star focus quality (distractions per focused hour). Days are the browser\'s local days ' +
+  'and times are local to the device. Time counts only while the tab is focused and the user ' +
+  'is not idle; "engaged" minutes exist only when activity tracking was on. webtime_query ' +
+  'runs any read-only SQL for what the other tools do not cover.';
 
 interface TextResult {
   [key: string]: unknown;
@@ -1200,6 +1221,176 @@ export function buildServer(): McpServer {
         );
       } catch (error) {
         return errorResult('Doctolib practitioner lookup failed', error);
+      }
+    },
+  );
+
+  // Web Time Tracker: read-only SQL against the extension's Neon mirror.
+  const webtime = getConnections().webTimeTracker;
+  const day = z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional();
+  const webtimeRange = {
+    from: day.describe('YYYY-MM-DD, first day (inclusive); default: `days` before `to`'),
+    to: day.describe('YYYY-MM-DD, last day (inclusive); default today'),
+    days: z
+      .number()
+      .int()
+      .min(1)
+      .max(366)
+      .optional()
+      .describe('Window length when `from` is omitted (default 7, today included)'),
+  };
+  const webtimeLimit = z
+    .number()
+    .int()
+    .min(1)
+    .max(200)
+    .optional()
+    .describe('Rows to return (default 25)');
+
+  server.registerTool(
+    'webtime_overview',
+    {
+      title: 'Web Time Tracker overview',
+      description:
+        'The first call for any question about time spent online or focus sessions. For a day ' +
+        'range (default the last 7 days): total browsing minutes, top 10 sites with their ' +
+        'share, lock-in focus minutes, sessions, distractions and quality per category, a ' +
+        'per-day series of browsing and focus minutes, and each device\'s last sync time.',
+      inputSchema: webtimeRange,
+      annotations: { readOnlyHint: true },
+    },
+    async args => {
+      try {
+        return jsonResult(await webtimeOverview(webtime.get(), args));
+      } catch (error) {
+        return errorResult('Web Time Tracker overview failed', error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'webtime_browsing',
+    {
+      title: 'Web Time Tracker browsing time',
+      description:
+        'Browsing time in a day range, grouped by site (default), day, hour (local hour the ' +
+        'session started), title (which pages or videos, per site), or session (raw sessions ' +
+        'with start/end, title and URL, newest first). Filter by site/hostname substring or by ' +
+        'page title/URL substring. Minutes; engaged_minutes is time with keyboard/mouse input, ' +
+        'null when activity tracking was off.',
+      inputSchema: {
+        ...webtimeRange,
+        group_by: z
+          .enum(BROWSING_GROUPS)
+          .optional()
+          .describe('site (default), day, hour, title, or session'),
+        site: z.string().min(1).optional().describe('Site or hostname contains, e.g. "youtube"'),
+        search: z.string().min(1).optional().describe('Page title or URL contains'),
+        limit: webtimeLimit,
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async args => {
+      try {
+        return jsonResult(
+          await webtimeBrowsing(webtime.get(), {
+            from: args.from,
+            to: args.to,
+            days: args.days,
+            groupBy: args.group_by,
+            site: args.site,
+            search: args.search,
+            limit: args.limit,
+          }),
+        );
+      } catch (error) {
+        return errorResult('Web Time Tracker browsing query failed', error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'webtime_focus',
+    {
+      title: 'Web Time Tracker lock-in focus sessions',
+      description:
+        'Lock-in focus sessions in a day range, grouped by category (default), day, hour ' +
+        '(local start hour), or session (each lock-in with start/end, paused minutes, ' +
+        'distraction times and average focus span, newest first). Every row carries focused ' +
+        'minutes (pauses excluded), distractions, distractions_per_hour and quality_stars ' +
+        '(5 = under 2 distractions per hour … 1 = 8 or more). status "abandoned" means the ' +
+        'lock-in was left running and closed automatically.',
+      inputSchema: {
+        ...webtimeRange,
+        group_by: z
+          .enum(FOCUS_GROUPS)
+          .optional()
+          .describe('category (default), day, hour, or session'),
+        category: z.string().min(1).optional().describe('Category name contains'),
+        search: z.string().min(1).optional().describe('Lock-in name contains'),
+        status: z.enum(FOCUS_STATUSES).optional().describe('completed or abandoned'),
+        limit: webtimeLimit,
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async args => {
+      try {
+        return jsonResult(
+          await webtimeFocus(webtime.get(), {
+            from: args.from,
+            to: args.to,
+            days: args.days,
+            groupBy: args.group_by,
+            category: args.category,
+            search: args.search,
+            status: args.status,
+            limit: args.limit,
+          }),
+        );
+      } catch (error) {
+        return errorResult('Web Time Tracker focus query failed', error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'webtime_query',
+    {
+      title: 'Web Time Tracker read-only SQL',
+      description:
+        'Run one read-only Postgres statement against the Web Time Tracker database, for ' +
+        'what the other webtime_* tools do not cover. Writes are refused by the database. ' +
+        'Tables: devices(id, name, timezone, last_sync_at); browsing_sessions(device_id, ' +
+        'started_at, ended_at, day, site, host, url, title, duration_ms, active_ms, keys, ' +
+        'clicks, scrolls, pointer); focus_sessions(id, device_id, day, name, category_id, ' +
+        'category_name, color, started_at, ended_at, duration_ms, paused_ms, ' +
+        'distraction_count, distractions jsonb [epoch ms], pauses jsonb [{start, end, auto?}], ' +
+        'status completed|abandoned); focus_categories(id, name, color, created_at, ' +
+        'deleted_at). Views: daily_site_time(device_id, day, site, ms, sessions, active_ms), ' +
+        'daily_focus_time(device_id, day, category_name, ms, sessions, distractions). ' +
+        'Timestamps are timestamptz (render with `at time zone devices.timezone`); day is ' +
+        'the local day; *_ms are milliseconds. bigint/numeric columns come back as strings ' +
+        'unless cast (::int, ::float8).',
+      inputSchema: {
+        sql: z.string().min(1).describe('A single SQL statement (no trailing statements)'),
+        max_rows: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_QUERY_ROWS)
+          .optional()
+          .describe('Rows to return (default 200)'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async args => {
+      try {
+        return jsonResult(await webtimeQuery(webtime.get(), { sql: args.sql, maxRows: args.max_rows }));
+      } catch (error) {
+        return errorResult('Web Time Tracker query failed', error);
       }
     },
   );

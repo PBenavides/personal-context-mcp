@@ -98,6 +98,16 @@ export interface ConnectionsConfig {
     defaultCountry: string;
     minIntervalMs: number;
   };
+  /**
+   * The Web Time Tracker's Neon Postgres mirror (browsing time and lock-in focus sessions from
+   * the Chrome extension) behind the personal-tools webtime_* tools (see
+   * `src/connections/neon.ts`). Empty `databaseUrl` disables them. Every query runs in a
+   * read-only transaction. The URL comes from `WEB_TIME_TRACKER_DATABASE_URL` (SSM in
+   * production) — never from code.
+   */
+  webTimeTracker: {
+    databaseUrl: string;
+  };
 }
 
 export interface AppConfig {
@@ -155,6 +165,7 @@ export const appConfig: AppConfig = {
       ...config.get<ConnectionsConfig['doctolib']>('connections.doctolib'),
       minIntervalMs: Number(config.get<number | string>('connections.doctolib.minIntervalMs')),
     },
+    webTimeTracker: config.get<ConnectionsConfig['webTimeTracker']>('connections.webTimeTracker'),
   },
   security: config.get<AppConfig['security']>('security'),
 };

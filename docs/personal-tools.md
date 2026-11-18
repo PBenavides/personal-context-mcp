@@ -313,6 +313,36 @@ contract and its quirks in [`doctolib.md`](doctolib.md).
 | `doctolib_search` | `specialty`, `city?` (Berlin), `availability?` (true), `within_days?` (14), `insurance_sector?`, `languages?`, `telehealth?`, `limit?` (10), `page?`, `country?` | Practitioners for a specialty in a city. By default it probes each bookable hit's slots and returns them soonest first; `availability: false` is the plain paged list. Each result carries `booking_url`, `profile_slug` and `motive_id`. |
 | `doctolib_practitioner` | `profile_slug`, `visit_motive_id?`, `start_date?`, `days?`, `country?` | One profile: visit motives, places, `booking_url`. With `visit_motive_id`, that motive's slots per place and day. |
 
+### Web Time Tracker (`webtime_*`)
+
+Read-only access to the Neon Postgres mirror of the Web Time Tracker Chrome extension
+(`chrome-personal-plugins/web-time-tracker`): how long Pablo spends on each site and his
+lock-in focus sessions. The extension pushes to Neon every 15 minutes, so the session in
+progress and anything newer than the last sync are not there yet. The handlers are in
+`webtime-tools.ts`, the transport in `src/connections/neon.ts`, and the table definitions in
+the extension's `db/schema.sql`.
+
+| Tool | Parameters | Purpose |
+|---|---|---|
+| `webtime_overview` | `from?`, `to?`, `days?` (7) | **The first call.** Browsing minutes, top 10 sites with their share, focus minutes, distractions and quality per category, a per-day series of both, and each device's last sync. |
+| `webtime_browsing` | `group_by?` (`site` \| `day` \| `hour` \| `title` \| `session`), `site?`, `search?`, `limit?` (25), + range | Browsing time broken down. `title` answers "which videos/pages"; `session` lists raw sessions with title and URL, newest first. `site` and `search` are case-insensitive substrings. |
+| `webtime_focus` | `group_by?` (`category` \| `day` \| `hour` \| `session`), `category?`, `search?`, `status?`, `limit?` (25), + range | Lock-ins broken down, each row with focused minutes, distractions, `distractions_per_hour` and the extension's 1–5 `quality_stars`. `session` adds distraction times and the average focus span. |
+| `webtime_query` | `sql`, `max_rows?` (200, max 2000) | One read-only SQL statement for anything else. The description carries the schema. |
+
+- **Ranges.** `from`/`to` are inclusive `YYYY-MM-DD`. They are compared with the
+  extension's `day` column, which is the browser's local day. With neither set, the window
+  is the last `days` days ending today in the timezone of the most recently synced device.
+  Times in results (`started`, `last_sync`, `hour`) are local to the recording device.
+- **Read-only, enforced by Postgres.** Every call is a Neon HTTP batch sent with
+  `Neon-Batch-Read-Only: true`. The batch opens with
+  `set_config('statement_timeout', '15000', true)`, which takes the transaction snapshot
+  before any caller SQL runs, so `SET TRANSACTION READ WRITE` fails as well. Verified
+  live: `CREATE`, data-modifying CTEs, `set_config('transaction_read_only', 'off')` and
+  multi-statement strings are all refused.
+- **Health check.** `/ready` reports only whether the URL is configured and well-formed.
+  It doesn't connect: a live probe on every poll would keep the Neon compute from
+  autosuspending.
+
 ## Secrets
 
 Same pattern as `OPENROUTER_API_KEY` — plain env vars through `node-config`
@@ -323,6 +353,7 @@ Same pattern as `OPENROUTER_API_KEY` — plain env vars through `node-config`
 | `YNAB_TOKEN` | https://app.ynab.com/settings/developer (personal access token) | SSM `/personal-context/ynab-token` |
 | `HEVY_API_KEY` | https://hevy.com/settings?developer (requires Hevy Pro) | SSM `/personal-context/hevy-api-key` |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | `client_id`/`client_secret` inside `my-mcp-platform/credentials/google_oauth_client.json` (an OAuth "Desktop app" client from Google Cloud Console) — reused as-is, same client already used for Sheets | SSM `/personal-context/google-client-id`, `/personal-context/google-client-secret` |
+| `WEB_TIME_TRACKER_DATABASE_URL` | Neon project `web-time-tracker` → Connect, or `NEON_DATABASE_URL` in `web-time-tracker/.env`. A role with `SELECT` only is preferable to the extension's `tracker_sync` (the transaction is read-only either way) | SSM `/personal-context/web-time-tracker-database-url` *(to be created)* |
 | `GOOGLE_CALENDAR_REFRESH_TOKEN` | **Needs a fresh consent** — `my-mcp-platform`'s existing `credentials/google_token.json` only carries the `spreadsheets`/`drive.file` scopes (Sheets), not `calendar`, so it can't be reused. Mint one with `uv run python servers/gcalendar/setup_oauth.py` in `my-mcp-platform` (one-time interactive browser flow), then read `refresh_token` out of the resulting `credentials/google_calendar_token.json` | SSM `/personal-context/google-calendar-refresh-token` |
 
 Empty value on any of the three ⇒ the connection reports "not configured" on

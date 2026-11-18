@@ -3,6 +3,7 @@ import { createDoctolibConnection } from './doctolib.js';
 import { createEnrichedCorpusConnection } from './enriched-corpus.js';
 import { createGoogleCalendarConnection } from './google-calendar.js';
 import { createHevyConnection } from './hevy.js';
+import { createNeonConnection } from './neon.js';
 import { createOntologyStoreConnection } from './ontology-store.js';
 import { createOpenRouterConnection } from './openrouter.js';
 import { createVectorSearchConnection } from './vector-search.js';
@@ -47,6 +48,7 @@ export function createConnections(
   const hevy = createHevyConnection(config.hevy);
   const googleCalendar = createGoogleCalendarConnection(config.googleCalendar);
   const doctolib = createDoctolibConnection(config.doctolib);
+  const webTimeTracker = createNeonConnection('web-time-tracker', config.webTimeTracker);
 
   const all: ReadonlyArray<Connection<unknown>> = [
     enrichedCorpus,
@@ -57,6 +59,7 @@ export function createConnections(
     hevy,
     googleCalendar,
     doctolib,
+    webTimeTracker,
   ];
   validateConnections(all);
 
@@ -69,6 +72,7 @@ export function createConnections(
     hevy,
     googleCalendar,
     doctolib,
+    webTimeTracker,
     all(): ReadonlyArray<Connection<unknown>> {
       return all;
     },

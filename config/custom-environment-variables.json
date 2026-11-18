@@ -53,6 +53,9 @@
     "doctolib": {
       "defaultCountry": "DOCTOLIB_COUNTRY",
       "minIntervalMs": "DOCTOLIB_MIN_INTERVAL_MS"
+    },
+    "webTimeTracker": {
+      "databaseUrl": "WEB_TIME_TRACKER_DATABASE_URL"
     }
   },
   "security": {
