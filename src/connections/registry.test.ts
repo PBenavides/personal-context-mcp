@@ -65,6 +65,9 @@ const configuredConfig: AppConfig['connections'] = {
     defaultCountry: 'de',
     minIntervalMs: 0,
   },
+  webTimeTracker: {
+    databaseUrl: '',
+  },
 };
 
 describe('validateConnections', () => {
@@ -94,6 +97,7 @@ describe('createConnections', () => {
     expect(registry.hevy.kind).toBe('hevy');
     expect(registry.googleCalendar.kind).toBe('google-calendar');
     expect(registry.doctolib.kind).toBe('doctolib');
+    expect(registry.webTimeTracker.kind).toBe('neon');
     expect(registry.all()).toEqual([
       registry.enrichedCorpus,
       registry.vectorSearch,
@@ -103,13 +107,14 @@ describe('createConnections', () => {
       registry.hevy,
       registry.googleCalendar,
       registry.doctolib,
+      registry.webTimeTracker,
     ]);
   });
 
   it('healthCheckAll() reports corpus not-loaded before load(), the rest inert', async () => {
     const registry = createConnections(configuredConfig);
     const results = await registry.healthCheckAll();
-    expect(results).toHaveLength(8);
+    expect(results).toHaveLength(9);
     expect(results[0].ok).toBe(false);
     expect(results[0].detail).toMatch(/not loaded/);
     expect(results[1].ok).toBe(true);
@@ -125,6 +130,8 @@ describe('createConnections', () => {
     expect(results[6].detail).toMatch(/not configured/);
     expect(results[7].ok).toBe(true);
     expect(results[7].detail).toMatch(/anonymous/);
+    expect(results[8].ok).toBe(true);
+    expect(results[8].detail).toMatch(/not configured/);
   });
 
   it('healthCheckAll() reports ok after load()', async () => {

@@ -2,6 +2,7 @@ import type { DoctolibConnection } from './doctolib.js';
 import type { EnrichedCorpusConnection } from './enriched-corpus.js';
 import type { GoogleCalendarConnection } from './google-calendar.js';
 import type { HevyConnection } from './hevy.js';
+import type { NeonConnection } from './neon.js';
 import type { OntologyStoreConnection } from './ontology-store.js';
 import type { OpenRouterConnection } from './openrouter.js';
 import type { VectorSearchConnection } from './vector-search.js';
@@ -26,7 +27,8 @@ export type ConnectionKind =
   | 'ynab'
   | 'hevy'
   | 'google-calendar'
-  | 'doctolib';
+  | 'doctolib'
+  | 'neon';
 
 /** Result of a lightweight liveness probe against a single connection. */
 export interface ConnectionHealth {
@@ -70,6 +72,7 @@ export interface ConnectionRegistry {
   readonly hevy: HevyConnection;
   readonly googleCalendar: GoogleCalendarConnection;
   readonly doctolib: DoctolibConnection;
+  readonly webTimeTracker: NeonConnection;
   /** All registered connections, for generic operations like health checks. */
   all(): ReadonlyArray<Connection<unknown>>;
   /** Probe every connection concurrently. */

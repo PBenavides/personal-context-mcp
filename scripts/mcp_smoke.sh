@@ -100,4 +100,11 @@ for tool in doctolib_search doctolib_practitioner; do
 done
 echo "smoke: personal-tools doctolib_* OK"
 
+# 7. webtime_* are registered on personal-tools — tools/list only, so the smoke never needs
+#    the Neon credentials
+for tool in webtime_overview webtime_browsing webtime_focus webtime_query; do
+  echo "$ptools" | grep -q "\"$tool\"" || fail "personal-tools tools/list missing $tool"
+done
+echo "smoke: personal-tools webtime_* OK"
+
 echo "smoke: ALL GREEN"

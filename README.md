@@ -5,14 +5,14 @@ A Fastify host that serves two MCP servers over **streamable HTTP**:
 | Route | MCP | What it does |
 |---|---|---|
 | `POST /personal-context` | `personal-context` | Read Pablo's enriched personal context — Obsidian vault notes and activity events, classified by [`context-pipeline`](../context-pipeline/) into a 14-category taxonomy. Semantic search (S3 Vectors) with a BM25 fallback, plus an OWL ontology. |
-| `POST /personal-tools` | `personal-tools` | Act on personal accounts — YNAB, Hevy and Google Calendar — and find doctor appointments on Doctolib (read-only). |
+| `POST /personal-tools` | `personal-tools` | Act on personal accounts — YNAB, Hevy and Google Calendar — find doctor appointments on Doctolib, and read browsing time and focus sessions from the Web Time Tracker (both read-only). |
 
 ```
 s3://…/context-enriched/ ──(loaded at boot, refreshed on new run_id)──► in-memory corpus
 s3 vectors (Titan embeddings) ──────────────────────────────────────────► semantic search
 
 client ──POST /personal-context (Bearer)──► search_context / get_document / list_taxonomy / ontology_*
-client ──POST /personal-tools   (Bearer)──► ynab_* / hevy_* / gcal_* / doctolib_*  ──► YNAB, Hevy, Google Calendar, Doctolib
+client ──POST /personal-tools   (Bearer)──► ynab_* / hevy_* / gcal_* / doctolib_* / webtime_*  ──► YNAB, Hevy, Google Calendar, Doctolib, Neon
 ```
 
 Production runs on a DigitalOcean droplet, reachable only over Tailscale.
@@ -56,6 +56,7 @@ cp .env.example .env
 | YNAB tools | `YNAB_TOKEN` |
 | Hevy tools | `HEVY_API_KEY` |
 | Google Calendar tools | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALENDAR_REFRESH_TOKEN` — see [docs/personal-tools.md](docs/personal-tools.md#secrets) for minting the token |
+| Web Time Tracker tools | `WEB_TIME_TRACKER_DATABASE_URL` (the extension's Neon connection string) |
 | Ontology injector + embeddings | `OPENROUTER_API_KEY` |
 
 Then `npm run dev` as before. Each credential switches on its own tools; the
@@ -195,6 +196,7 @@ Details: [docs/CICD.md](docs/CICD.md) and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.m
 | Hevy | `hevy_recent_activity`, `hevy_get_workout`, `hevy_routines`, `hevy_body_measurements`, `hevy_calculate_burnt_calories`, `hevy_search_exercise_catalog`, `hevy_write_routine` | Read-only except `hevy_write_routine` (with `dry_run`). |
 | Google Calendar | `gcal_list_calendars`, `gcal_list_events`, `gcal_get_event`, `gcal_create_event`, `gcal_update_event`, `gcal_delete_event`, `gcal_free_busy` | Defaults to the primary calendar. |
 | Doctolib | `doctolib_search`, `doctolib_practitioner` | Read-only, no credentials. Search returns practitioners with their earliest slots; practitioner gives motives, places, a booking link, and a motive's slots. See [docs/doctolib.md](docs/doctolib.md). |
+| Web Time Tracker | `webtime_overview`, `webtime_browsing`, `webtime_focus`, `webtime_query` | Read-only, from the Chrome extension's Neon mirror (synced every 15 min). Time per site, day, hour or page title; lock-in focus sessions with distractions and quality; read-only SQL. See [docs/personal-tools.md](docs/personal-tools.md#web-time-tracker-webtime_). |
 
 ## Configuration reference
 
@@ -221,6 +223,7 @@ every variable with comments.
 | `HEVY_API_KEY` | *(empty = `hevy_*` off)* | Secret. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_CALENDAR_REFRESH_TOKEN` | *(any empty = `gcal_*` off)* | Secrets. |
 | `DOCTOLIB_COUNTRY` / `DOCTOLIB_MIN_INTERVAL_MS` | `de` / `600` | Default Doctolib site and per-host request throttle. Not secrets. |
+| `WEB_TIME_TRACKER_DATABASE_URL` | *(empty = `webtime_*` off)* | Secret. Neon connection string; every query runs read-only. |
 
 All secrets come from `.env` locally and from SSM `/personal-context/*` in
 production.
@@ -233,7 +236,7 @@ production.
 | [docs/mcp-registry.md](docs/mcp-registry.md) | Adding a new MCP. |
 | [docs/connections.md](docs/connections.md) | Adding an external dependency. |
 | [docs/personal-context-mcp.md](docs/personal-context-mcp.md) | Corpus MCP: tools, search, corpus shape. |
-| [docs/personal-tools.md](docs/personal-tools.md) | YNAB / Hevy / Calendar tools and their secrets. |
+| [docs/personal-tools.md](docs/personal-tools.md) | YNAB / Hevy / Calendar / Web Time Tracker tools and their secrets. |
 | [docs/doctolib.md](docs/doctolib.md) | The Doctolib tools: endpoints, API quirks, what wasn't ported. |
 | [docs/ontologies.md](docs/ontologies.md) | The OWL ontology layer. |
 | [docs/server-and-hosting.md](docs/server-and-hosting.md) | App assembly, config, auth, management routes. |
