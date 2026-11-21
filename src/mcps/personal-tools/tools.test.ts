@@ -1760,6 +1760,34 @@ describe('gcalCreateEvent', () => {
     });
     expect(client.calls[0].params).toEqual({ sendUpdates: 'all' });
   });
+
+  it('maps a color name to its colorId and reports it back by name', async () => {
+    const client = fakeGcal({
+      '/calendars/primary/events': { id: 'new4', summary: 'Gym', colorId: '10', start: {}, end: {} },
+    });
+    const result = (await gcalCreateEvent(client, {
+      summary: 'Gym',
+      start: '2026-07-22T10:00:00',
+      end: '2026-07-22T11:00:00',
+      color: 'basil',
+    })) as Record<string, unknown>;
+    expect(client.calls[0].body).toMatchObject({ colorId: '10' });
+    expect(result).toMatchObject({ color: 'basil', color_id: '10' });
+  });
+
+  it('omits colorId for the default color', async () => {
+    const client = fakeGcal({
+      '/calendars/primary/events': { id: 'new5', summary: 'Sync', start: {}, end: {} },
+    });
+    const result = (await gcalCreateEvent(client, {
+      summary: 'Sync',
+      start: '2026-07-22T10:00:00',
+      end: '2026-07-22T10:30:00',
+      color: 'default',
+    })) as Record<string, unknown>;
+    expect(client.calls[0].body).not.toHaveProperty('colorId');
+    expect(result).toMatchObject({ color: 'default', color_id: undefined });
+  });
 });
 
 describe('gcalUpdateEvent', () => {
@@ -1773,6 +1801,17 @@ describe('gcalUpdateEvent', () => {
       body: { summary: 'New title', start: { date: '2026-07-23' } },
     });
     expect(client.calls[0].body).not.toHaveProperty('end');
+    expect(client.calls[0].body).not.toHaveProperty('colorId');
+  });
+
+  it('sets a color, and clears it with null for "default"', async () => {
+    const client = fakeGcal({
+      '/calendars/primary/events/e1': { id: 'e1', summary: 'X', start: {}, end: {} },
+    });
+    await gcalUpdateEvent(client, { eventId: 'e1', color: 'tomato' });
+    await gcalUpdateEvent(client, { eventId: 'e1', color: 'default' });
+    expect(client.calls[0].body).toEqual({ colorId: '11' });
+    expect(client.calls[1].body).toEqual({ colorId: null });
   });
 });
 

@@ -14,6 +14,8 @@ import {
 } from './ynab-payloads.js';
 import {
   ACTIVITY_TYPES,
+  GCAL_EVENT_COLORS,
+  type GcalEventColor,
   gcalCreateEvent,
   gcalDeleteEvent,
   gcalFreeBusy,
@@ -851,6 +853,16 @@ export function buildServer(): McpServer {
     .optional()
     .describe('Calendar to use; defaults to "primary"');
 
+  const eventColorNames = Object.keys(GCAL_EVENT_COLORS) as [GcalEventColor, ...GcalEventColor[]];
+  const eventColor = z
+    .enum([...eventColorNames, 'default'])
+    .optional()
+    .describe(
+      'Event color from Google Calendar\'s palette: ' +
+        eventColorNames.map(name => `${name} (${GCAL_EVENT_COLORS[name].hex})`).join(', ') +
+        '. Omit or "default" to use the calendar\'s color.',
+    );
+
   server.registerTool(
     'gcal_list_calendars',
     {
@@ -954,6 +966,7 @@ export function buildServer(): McpServer {
         all_day: z.boolean().optional().describe('Treat start/end as dates, not datetimes'),
         timezone: z.string().optional().describe('IANA timezone; defaults to UTC'),
         send_notifications: z.boolean().optional().describe('Email invites to attendees'),
+        color: eventColor,
       },
     },
     async args => {
@@ -970,6 +983,7 @@ export function buildServer(): McpServer {
             allDay: args.all_day,
             timezone: args.timezone,
             sendNotifications: args.send_notifications,
+            color: args.color,
           }),
         );
       } catch (error) {
@@ -997,6 +1011,9 @@ export function buildServer(): McpServer {
           .describe('Replaces the full attendee list; pass [] to remove all'),
         timezone: z.string().optional().describe('IANA timezone for start/end'),
         send_notifications: z.boolean().optional().describe('Notify attendees of the change'),
+        color: eventColor.describe(
+          'Event color; "default" reverts to the calendar\'s color. Omit to leave unchanged.',
+        ),
       },
     },
     async args => {
@@ -1013,6 +1030,7 @@ export function buildServer(): McpServer {
             attendees: args.attendees,
             timezone: args.timezone,
             sendNotifications: args.send_notifications,
+            color: args.color,
           }),
         );
       } catch (error) {
