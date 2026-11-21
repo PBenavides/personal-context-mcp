@@ -290,10 +290,17 @@ attendees, organizer, ...) — same shape the Python `_format_event` produced.
 | `gcal_list_calendars` | `min_access_role?` | List calendars the account can see. |
 | `gcal_list_events` | `calendar_id?`, `time_min?`, `time_max?`, `query?`, `max_results?` (default 50, max 2500) | List/search events, recurring events expanded, ordered by start time. |
 | `gcal_get_event` | `event_id`, `calendar_id?` | Fetch one event. |
-| `gcal_create_event` | `summary`, `start`, `end`, `calendar_id?`, `description?`, `location?`, `attendees?`, `all_day?`, `timezone?`, `send_notifications?` | Create an event. `all_day` events take `YYYY-MM-DD` for start/end; timed events take RFC3339 + `timezone` (default UTC). |
-| `gcal_update_event` | `event_id`, `calendar_id?`, + same optional fields as create | Partial update (PATCH) — only provided fields change. |
+| `gcal_create_event` | `summary`, `start`, `end`, `calendar_id?`, `description?`, `location?`, `attendees?`, `all_day?`, `timezone?`, `send_notifications?`, `color?` | Create an event. `all_day` events take `YYYY-MM-DD` for start/end; timed events take RFC3339 + `timezone` (default UTC). |
+| `gcal_update_event` | `event_id`, `calendar_id?`, + same optional fields as create | Partial update (PATCH) — only provided fields change. `color: "default"` clears the event's own color. |
 | `gcal_delete_event` | `event_id`, `calendar_id?`, `send_notifications?` | Delete an event. |
 | `gcal_free_busy` | `time_min`, `time_max`, `calendar_ids?` (default `["primary"]`) | Busy blocks per calendar in a window — use to infer free slots. |
+
+**Event colors.** `color` takes a name from Google's fixed 11-color event palette —
+`lavender` (1), `sage` (2), `grape` (3), `flamingo` (4), `banana` (5), `tangerine` (6),
+`peacock` (7), `graphite` (8), `blueberry` (9), `basil` (10), `tomato` (11) — or
+`default`, meaning no event color (it inherits the calendar's). The tool maps names to
+Google's `colorId`; formatted events report both `color` (name, or `default`) and
+`color_id`. The palette lives in `GCAL_EVENT_COLORS` in `tools.ts`.
 
 Mapping from the Python surface: `gcal_list_calendars` /  `gcal_list_events` /
 `gcal_get_event` / `gcal_create_event` / `gcal_update_event` /

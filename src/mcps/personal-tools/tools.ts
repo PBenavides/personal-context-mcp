@@ -1872,6 +1872,39 @@ interface GcalEvent {
   created?: string;
   updated?: string;
   recurringEventId?: string;
+  colorId?: string;
+}
+
+/**
+ * Google Calendar's fixed event palette (`GET /colors` → `event`), keyed by the names the
+ * Calendar UI shows. An event with no `colorId` inherits its calendar's color.
+ */
+export const GCAL_EVENT_COLORS = {
+  lavender: { id: '1', hex: '#a4bdfc' },
+  sage: { id: '2', hex: '#7ae7bf' },
+  grape: { id: '3', hex: '#dbadff' },
+  flamingo: { id: '4', hex: '#ff887c' },
+  banana: { id: '5', hex: '#fbd75b' },
+  tangerine: { id: '6', hex: '#ffb878' },
+  peacock: { id: '7', hex: '#46d6db' },
+  graphite: { id: '8', hex: '#e1e1e1' },
+  blueberry: { id: '9', hex: '#5484ed' },
+  basil: { id: '10', hex: '#51b749' },
+  tomato: { id: '11', hex: '#dc2127' },
+} as const;
+
+export type GcalEventColor = keyof typeof GCAL_EVENT_COLORS;
+
+/** `default` drops the event's own color so it falls back to the calendar's. */
+export type GcalEventColorArg = GcalEventColor | 'default';
+
+function colorName(colorId: string | undefined): GcalEventColor | undefined {
+  if (colorId === undefined) {
+    return undefined;
+  }
+  return (Object.keys(GCAL_EVENT_COLORS) as GcalEventColor[]).find(
+    name => GCAL_EVENT_COLORS[name].id === colorId,
+  );
 }
 
 /** Normalizes a raw Google Calendar event — the `_format_event` port. */
@@ -1897,6 +1930,8 @@ function formatEvent(raw: GcalEvent): Json {
     created: raw.created,
     updated: raw.updated,
     recurring_event_id: raw.recurringEventId,
+    color: colorName(raw.colorId) ?? 'default',
+    color_id: raw.colorId,
   };
 }
 
@@ -2009,6 +2044,7 @@ export interface GcalCreateEventArgs {
   allDay?: boolean;
   timezone?: string;
   sendNotifications?: boolean;
+  color?: GcalEventColorArg;
 }
 
 export async function gcalCreateEvent(
@@ -2035,6 +2071,9 @@ export async function gcalCreateEvent(
   if (args.attendees) {
     body.attendees = args.attendees.map(email => ({ email }));
   }
+  if (args.color && args.color !== 'default') {
+    body.colorId = GCAL_EVENT_COLORS[args.color].id;
+  }
 
   const raw = (await client.post(
     `/calendars/${encodeCalendarId(calendarId)}/events`,
@@ -2055,6 +2094,7 @@ export interface GcalUpdateEventArgs {
   attendees?: string[];
   timezone?: string;
   sendNotifications?: boolean;
+  color?: GcalEventColorArg;
 }
 
 export async function gcalUpdateEvent(
@@ -2075,6 +2115,10 @@ export async function gcalUpdateEvent(
   }
   if (args.attendees !== undefined) {
     body.attendees = args.attendees.map(email => ({ email }));
+  }
+  if (args.color !== undefined) {
+    // PATCH clears a field sent as null, which reverts the event to its calendar's color.
+    body.colorId = args.color === 'default' ? null : GCAL_EVENT_COLORS[args.color].id;
   }
   const timeZone = args.timezone ?? 'UTC';
   if (args.start !== undefined) {
